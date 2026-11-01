@@ -54,11 +54,13 @@ needs_motion_vectors = false
 needs_normal_roughness = false
 script = ExtResource("10_hu8bq")
 layers = Array[ExtResource("8_y4qkf")]([SubResource("Resource_jbdfk")])
+coverage = 0.604
+skybox_enabled = true
 has_last_directional = true
-last_directional_directions = PackedVector3Array(0.7383478, 0.51651394, -0.43365428)
+last_directional_directions = PackedVector3Array(0.7117084, 0.5371706, -0.4526798)
 last_directional_radiance = PackedVector3Array(1, 1, 1)
 last_directional_samples = PackedInt32Array(4)
-last_sun_direction = Vector3(0.7383478, 0.51651394, -0.43365428)
+last_sun_direction = Vector3(0.7117084, 0.5371706, -0.4526798)
 
 [sub_resource type="Compositor" id="Compositor_5g7v7"]
 compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4gl14")])
@@ -78,8 +80,8 @@ environment = SubResource("Environment_ob8ie")
 compositor = SubResource("Compositor_5g7v7")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=751721016]
-transform = Transform3D(-0.6740462, -0.022458432, 0.7383479, 0.5437479, 0.6614769, 0.5165139, -0.50000006, 0.74962926, -0.43365425, 0, 0, 0)
-light_color = Color(0.8420263, 0.67315257, 0.46862933, 1)
+transform = Transform3D(-0.702116, -0.022458404, 0.7117087, 0.52335095, 0.66147685, 0.53717047, -0.48284268, 0.74962926, -0.45267987, 0, 0, 0)
+light_color = Color(0.8535451, 0.6945261, 0.49759603, 1)
 shadow_enabled = true
 directional_shadow_max_distance = 10000.0
 
