@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://b0ok20ujhrtjg"
+path="res://.godot/imported/SunshineClouds3CurlNoise.glsl-52f36cf3dd74d95d2b543750c314a17e.res"
+
+[deps]
+
+source_file="res://addons/SunshineClouds3/Compute/SunshineClouds3CurlNoise.glsl"
+dest_files=["res://.godot/imported/SunshineClouds3CurlNoise.glsl-52f36cf3dd74d95d2b543750c314a17e.res"]
+
+[params]
+

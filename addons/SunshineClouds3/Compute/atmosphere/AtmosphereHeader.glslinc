@@ -1,0 +1,26 @@
+// Glue for Eric Bruneton's Precomputed Atmospheric Scattering (AtmosphereDefinitions.glslinc and
+// AtmosphereFunctions.glslinc are his definitions.glsl and functions.glsl, unchanged; BSD
+// licence in LICENSE.txt). This plays the part of the header model.cc prepends: the GLSL
+// macros, texture sizes and the ATMOSPHERE parameters, which come from a uniform buffer here
+// so they can change at runtime. Lengths are in kilometres, radiance for 680, 550 and 440 nm.
+//
+// Include order (Godot's shader import doesn't nest includes): AtmosphereHeader.glslinc,
+// AtmosphereDefinitions.glslinc, AtmosphereParameters.glslinc (define ATMOSPHERE_BINDING, set 0,
+// first), AtmosphereFunctions.glslinc.
+
+#define IN(x) const in x
+#define OUT(x) out x
+#define TEMPLATE(x)
+#define TEMPLATE_ARGUMENT(x)
+#define assert(x)
+
+const int TRANSMITTANCE_TEXTURE_WIDTH = 256;
+const int TRANSMITTANCE_TEXTURE_HEIGHT = 64;
+const int SCATTERING_TEXTURE_R_SIZE = 32;
+const int SCATTERING_TEXTURE_MU_SIZE = 128;
+const int SCATTERING_TEXTURE_MU_S_SIZE = 32;
+const int SCATTERING_TEXTURE_NU_SIZE = 8;
+const int IRRADIANCE_TEXTURE_WIDTH = 64;
+const int IRRADIANCE_TEXTURE_HEIGHT = 16;
+// Rayleigh + multiple scattering in rgb, single Mie red in alpha.
+#define COMBINED_SCATTERING_TEXTURES

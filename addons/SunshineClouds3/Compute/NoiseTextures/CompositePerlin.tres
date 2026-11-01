@@ -1,0 +1,15 @@
+[gd_resource type="NoiseTexture3D" format=3 uid="uid://d3gmnswewxfoc"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_CompositePerlin"]
+noise_type = 3
+seed = 1
+frequency = 0.02
+fractal_octaves = 4
+
+[resource]
+width = 128
+height = 128
+depth = 128
+noise = SubResource("FastNoiseLite_CompositePerlin")
+seamless = true
+seamless_blend_skirt = 0.3

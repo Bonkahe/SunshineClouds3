@@ -1,0 +1,191 @@
+// The sky, shared by SunshineClouds3Resolve.glsl (on screen) and SunshineClouds3Raymarch.glsl's
+// skybox version (the baked skybox). Include after SunshineClouds3Common.glslinc, the atmosphere
+// includes and transmittance_texture, scattering_texture and irradiance_texture.
+
+// std140, SKY_BYTES in SunshineClouds3.gd, written by it when they change.
+layout(set = 0, binding = 29, std140) uniform SkySettings {
+	mat4 background_basis; // 0, world direction -> background texture direction
+	vec3 background_color; // 64, tint * energy (0 = no background)
+	float background_fade; // 76, sky luminance that dims the background to 1/e (0 = never)
+	vec3 skybox_ground_albedo; // 80, the skybox's ground below the horizon
+	float background_skybox_energy; // 92, scales the background in the skybox
+	float skybox_radiance_multiplier; // 96, scales the whole skybox (skybox_energy and the clouds' dimming)
+	float skybox_cloud_distance; // 100, how far the skybox marches the clouds (m)
+	int skybox_cloud_steps; // 104, view steps through the layers (0 = no clouds)
+	int skybox_cloud_light_steps; // 108, steps towards each directional light
+} sky_settings;
+
+// An equirectangular panorama, laid out as Godot's SKY_COORDS (PanoramaSkyMaterial).
+layout(set = 0, binding = 30) uniform sampler2D background_texture;
+
+// Keeps the sun disc inside half float range.
+const float MAX_RADIANCE = 60000.0;
+// Within this of the horizon cosine, aerial perspective blends rays just below and just above it
+// (as Bruneton's 2008 implementation did), hiding the seam where GetSkyRadianceToPoint switches
+// between the ground and sky halves of the scattering texture. Narrower leaves the seam visible at
+// atmospheric_density 4.
+const float AERIAL_PERSPECTIVE_HORIZON_EPSILON = 0.03;
+
+// GetSkyRadianceToPoint (shadow_length 0), returning Rayleigh and multiple scattering, with the
+// sun's single Mie scattering (the glow around the sun) apart.
+vec3 sky_radiance_to_point_parts(AtmosphereParameters atmosphere, vec3 camera, vec3 point, out vec3 transmittance, out vec3 glow) {
+	vec3 view_ray = normalize(point - camera);
+	float r = length(camera);
+	float rmu = dot(camera, view_ray);
+	float distance_to_top_atmosphere_boundary = -rmu - sqrt(rmu * rmu - r * r + atmosphere.top_radius * atmosphere.top_radius);
+	if (distance_to_top_atmosphere_boundary > 0.0) {
+		camera = camera + view_ray * distance_to_top_atmosphere_boundary;
+		r = atmosphere.top_radius;
+		rmu += distance_to_top_atmosphere_boundary;
+	}
+	float mu = rmu / r;
+	float mu_s = dot(camera, params.sun_direction) / r;
+	float nu = dot(view_ray, params.sun_direction);
+	float d = length(point - camera);
+	bool ray_r_mu_intersects_ground = RayIntersectsGround(atmosphere, r, mu);
+	transmittance = GetTransmittance(atmosphere, transmittance_texture, r, mu, d, ray_r_mu_intersects_ground);
+
+	vec3 single_mie_scattering;
+	vec3 scattering = GetCombinedScattering(atmosphere, scattering_texture, scattering_texture,
+			r, mu, mu_s, nu, ray_r_mu_intersects_ground, single_mie_scattering);
+	float r_p = ClampRadius(atmosphere, sqrt(d * d + 2.0 * r * mu * d + r * r));
+	vec3 single_mie_scattering_p;
+	vec3 scattering_p = GetCombinedScattering(atmosphere, scattering_texture, scattering_texture,
+			r_p, (r * mu + d) / r_p, (r * mu_s + d * nu) / r_p, nu, ray_r_mu_intersects_ground, single_mie_scattering_p);
+	scattering = scattering - transmittance * scattering_p;
+	single_mie_scattering = single_mie_scattering - transmittance * single_mie_scattering_p;
+	single_mie_scattering = GetExtrapolatedSingleMieScattering(atmosphere, vec4(scattering, single_mie_scattering.r));
+	// Bruneton's hack against artifacts with the sun below the horizon.
+	single_mie_scattering *= smoothstep(0.0, 0.01, mu_s);
+	glow = single_mie_scattering * MiePhaseFunction(atmosphere.mie_phase_function_g, nu);
+	return scattering * RayleighPhaseFunction(nu);
+}
+
+// The light a view ray picks up through the atmosphere on its way to a world distance (m), in scene
+// units, and its transmittance. glow_scale scales the sun's glow in it.
+vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, out vec3 transmittance) {
+	AtmosphereParameters atmosphere = ATMOSPHERE;
+	float distance_km = distance * 0.001;
+	float evaluated_km = max(distance_km, 0.1); // Min aerial perspective distance (km): nearer, it's evaluated here and scaled down, since two positions ~6360 km from the planet centre are too close for float precision. 0.05-0.5: lower risks precision noise, higher misfogs near objects.
+	vec3 camera = atmosphere_position(ray_origin);
+	vec3 point = atmosphere_position(ray_origin + ray_direction * (evaluated_km * 1000.0));
+	vec3 view = normalize(point - camera);
+	float r = length(camera);
+	vec3 up = camera / r;
+	float mu = dot(view, up);
+	float mu_horizon = -sqrt(max(1.0 - (atmosphere.bottom_radius / r) * (atmosphere.bottom_radius / r), 0.0));
+	vec3 in_scatter;
+	if (abs(mu - mu_horizon) >= AERIAL_PERSPECTIVE_HORIZON_EPSILON) {
+		vec3 glow;
+		in_scatter = sky_radiance_to_point_parts(atmosphere, camera, point, transmittance, glow);
+		in_scatter += glow * glow_scale;
+	} else {
+		float d = length(point - camera);
+		vec3 tangent = normalize(view - up * mu);
+		// The ray below must still reach d above the ground: through the planet its scattering is
+		// garbage (far clouds near the horizon went dark). Within the horizon distance the lowest such
+		// ray meets the ground at d; past it only rays skimming the horizon get there, lifted as the
+		// sky lifts its rays so they stay in the scattering texture's sky half.
+		float horizon_distance = sqrt(max((r - atmosphere.bottom_radius) * (r + atmosphere.bottom_radius), 0.0));
+		float mu_reaching = d < horizon_distance ? -(horizon_distance * horizon_distance + d * d) / (2.0 * r * d) : mu_horizon + 0.001;
+		float mu_below = max(mu_horizon - AERIAL_PERSPECTIVE_HORIZON_EPSILON, mu_reaching);
+		float mu_above = mu_horizon + AERIAL_PERSPECTIVE_HORIZON_EPSILON;
+		vec3 transmittance_below;
+		vec3 transmittance_above;
+		vec3 glow_below;
+		vec3 glow_above;
+		vec3 in_scatter_below = sky_radiance_to_point_parts(atmosphere,
+				camera, camera + (up * mu_below + tangent * sqrt(1.0 - mu_below * mu_below)) * d, transmittance_below, glow_below);
+		vec3 in_scatter_above = sky_radiance_to_point_parts(atmosphere,
+				camera, camera + (up * mu_above + tangent * sqrt(1.0 - mu_above * mu_above)) * d, transmittance_above, glow_above);
+		float blend = clamp((mu - mu_below) / (mu_above - mu_below), 0.0, 1.0);
+		transmittance = mix(transmittance_below, transmittance_above, blend);
+		in_scatter = mix(in_scatter_below + glow_below * glow_scale, in_scatter_above + glow_above * glow_scale, blend);
+	}
+	float fraction = distance_km / evaluated_km;
+	transmittance = pow(transmittance, vec3(fraction));
+	return in_scatter * fraction * params.radiance_scale;
+}
+
+// The sky's light towards ray_origin (world) from ray_direction, before radiance_scale: the
+// scattering, the sun's glow, and its disc scaled by sun_disc. No planet ground: the scene's
+// terrain is the ground, so rays below the horizon are lifted to just above it, keeping their
+// angle to the sun so the glow around a low sun stays a round halo. transmittance is the ray's to
+// space (0 below the horizon, where nothing behind the sky shows).
+vec3 sky_radiance(vec3 ray_origin, vec3 ray_direction, float sun_disc, out vec3 transmittance) {
+	AtmosphereParameters atmosphere = ATMOSPHERE;
+	vec3 sun_direction = params.sun_direction;
+	vec3 camera = atmosphere_position(ray_origin);
+	float r = length(camera);
+	vec3 up = camera / r;
+	float ray_mu = dot(ray_direction, up);
+	float mu_lifted = -sqrt(max(1.0 - (atmosphere.bottom_radius / r) * (atmosphere.bottom_radius / r), 0.0)) + 0.001; // Horizon lift (cosine) for sky rays that would reach the ground. 0.0005-0.005: lower shows a dark seam at the horizon, higher visibly raises it.
+	bool below_horizon = ray_mu < mu_lifted;
+	vec3 view = ray_direction;
+	if (below_horizon) {
+		// The horizontal frame: towards the sun's azimuth, and across it.
+		vec3 sun_horizontal = sun_direction - up * dot(sun_direction, up);
+		float sun_horizontal_length = length(sun_horizontal);
+		vec3 ray_horizontal = ray_direction - up * ray_mu;
+		vec3 toward = sun_horizontal_length > 1e-4 ? sun_horizontal / sun_horizontal_length
+				: (length(ray_horizontal) > 1e-6 ? normalize(ray_horizontal) : normalize(cross(up, vec3(1.0, 0.0, 0.0))));
+		vec3 across = cross(up, toward);
+		// The azimuth from the sun's at which a ray at mu_lifted has the ray's cosine to the sun.
+		float horizontal = sqrt(1.0 - mu_lifted * mu_lifted);
+		float cos_azimuth = sun_horizontal_length > 1e-4
+				? clamp((dot(ray_direction, sun_direction) - mu_lifted * dot(sun_direction, up)) / (horizontal * sun_horizontal_length), -1.0, 1.0)
+				: dot(normalize(ray_horizontal + toward * 1e-6), toward);
+		float sin_azimuth = sqrt(max(1.0 - cos_azimuth * cos_azimuth, 0.0)) * (dot(ray_direction, across) < 0.0 ? -1.0 : 1.0);
+		view = up * mu_lifted + (toward * cos_azimuth + across * sin_azimuth) * horizontal;
+	}
+	// GetSkyRadiance (shadow_length 0) with the sun's single Mie scattering (the glow) apart.
+	transmittance = vec3(1.0);
+	vec3 radiance = vec3(0.0);
+	vec3 glow = vec3(0.0);
+	float rmu = dot(camera, view);
+	float distance_to_top_atmosphere_boundary = -rmu - sqrt(rmu * rmu - r * r + atmosphere.top_radius * atmosphere.top_radius);
+	if (distance_to_top_atmosphere_boundary > 0.0) {
+		camera += view * distance_to_top_atmosphere_boundary;
+		r = atmosphere.top_radius;
+		rmu += distance_to_top_atmosphere_boundary;
+	}
+	if (r <= atmosphere.top_radius) {
+		float mu = rmu / r;
+		float mu_s = dot(camera, sun_direction) / r;
+		float nu = dot(view, sun_direction);
+		bool ray_r_mu_intersects_ground = RayIntersectsGround(atmosphere, r, mu);
+		transmittance = ray_r_mu_intersects_ground ? vec3(0.0) : GetTransmittanceToTopAtmosphereBoundary(atmosphere, transmittance_texture, r, mu);
+		vec3 single_mie_scattering;
+		radiance = GetCombinedScattering(atmosphere, scattering_texture, scattering_texture,
+				r, mu, mu_s, nu, ray_r_mu_intersects_ground, single_mie_scattering) * RayleighPhaseFunction(nu);
+		glow = single_mie_scattering * MiePhaseFunction(atmosphere.mie_phase_function_g, nu);
+	}
+	if (below_horizon) {
+		transmittance = vec3(0.0);
+	} else if (dot(ray_direction, sun_direction) > cos(atmosphere.sun_angular_radius)) {
+		glow += transmittance * sun_disc * atmosphere.solar_irradiance / (PI * atmosphere.sun_angular_radius * atmosphere.sun_angular_radius);
+	}
+	return radiance + glow;
+}
+
+// The background's light from ray_direction, through transmittance (the atmosphere's to space),
+// fading out as the sky in front of it (sky, scene units) brightens: stars come out at dusk, first
+// on the side away from the sun. pixel_angle (radians across a pixel) picks the mip, so stars
+// smaller than a pixel average out instead of flickering.
+vec3 background_radiance(vec3 ray_direction, float pixel_angle, vec3 transmittance, vec3 sky) {
+	if (all(lessThanEqual(sky_settings.background_color, vec3(0.0))) || all(lessThanEqual(transmittance, vec3(0.0)))) {
+		return vec3(0.0);
+	}
+	float visibility = 1.0;
+	if (sky_settings.background_fade > 0.0) {
+		visibility = exp(-dot(sky, vec3(0.2126, 0.7152, 0.0722)) / sky_settings.background_fade);
+		if (visibility < 1e-4) {
+			return vec3(0.0);
+		}
+	}
+	vec3 direction = normalize(mat3(sky_settings.background_basis) * ray_direction);
+	// SKY_COORDS: u = atan(x, -z) / 2pi from 0, v = acos(y) / pi.
+	vec2 uv = vec2(fract(atan(direction.x, -direction.z) / (2.0 * PI)), acos(clamp(direction.y, -1.0, 1.0)) / PI);
+	float lod = max(log2(pixel_angle * float(textureSize(background_texture, 0).y) / PI), 0.0);
+	return textureLod(background_texture, uv, lod).rgb * sky_settings.background_color * transmittance * visibility;
+}

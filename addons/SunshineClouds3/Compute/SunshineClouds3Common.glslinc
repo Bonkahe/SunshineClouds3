@@ -1,0 +1,276 @@
+// Shared by SunshineClouds3Raymarch.glsl and SunshineClouds3Resolve.glsl. Define CLOUD_SHADOWS
+// before including it for the Shadow block.
+
+layout(set = 0, binding = 1) uniform sampler2D depth_texture;
+
+// std140, 368 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
+layout(set = 0, binding = 3, std140) uniform Params {
+	// Per frame.
+	mat4 inv_projection; // 0
+	mat4 camera_to_world; // 64
+	mat4 prev_view_projection; // 128, world -> previous frame clip space
+	vec3 sun_direction; // 192, towards the atmosphere's sun
+	uint frame; // 204
+	vec4 planet; // 208, xyz = the camera's offset from the planet centre (m), w = 1 spherical, 0 flat
+	uvec2 screen_size; // 224
+	int layer_count; // 232
+	bool history_valid; // 236
+	// Settings.
+	vec3 ambient_color; // 240
+	float ambient_energy; // 252
+	float primary_phase_g; // 256
+	float current_frame_weight; // 260
+	int raymarch_resolution; // 264, divisor
+	float cloud_step_size; // 268, view step once a ray has found cloud
+	float secondary_phase_g; // 272
+	float multiple_scattering_depth_power; // 276
+	float multiple_scattering_height_power; // 280
+	float near_step_size; // 284
+	float far_step_size_offset; // 288
+	float step_adjustment_distance; // 292
+	int max_steps; // 296
+	int reserved_300; // 300
+	float light_march_distance; // 304
+	float light_step_growth; // 308
+	float reserved_312; // 312
+	float max_distance; // 316
+	float radiance_scale; // 320
+	float ground_height; // 324
+	float planet_radius; // 328, km
+	float noise_mean; // 332, of the noise composite
+	float noise_deviation; // 336, of the noise composite
+	int curl_iterations; // 340
+	int cloud_exit_steps; // 344, empty samples before the view ray goes back to coarse steps
+	int interlace; // 348, the raymarch traces 1 in this many texels a frame
+	float wind_reprojection_distance; // 352
+	float ambient_occlusion; // 356, 0 = profile ambient, 1 = density-aware
+	float ambient_ground_strength; // 360, light from below as a fraction of the sky's
+	float ambient_extinction_scale; // 364
+} params;
+
+// Must match SunshineClouds3.gd's MAX_LAYERS.
+#define MAX_LAYERS 8
+
+// std140, 112 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
+struct CloudLayer {
+	vec3 noise_offset; // 0
+	float noise_scale; // 12
+	vec3 detail_noise_offset; // 16
+	float detail_noise_scale; // 28
+	vec3 curl_noise_offset; // 32
+	float curl_noise_scale; // 44
+	vec3 wind_delta; // 48, how far the base noise moved since the previous frame
+	float cloud_floor; // 60
+	vec2 coverage_noise_offset; // 64, world XZ
+	float coverage_noise_scale; // 72
+	float coverage_noise_strength; // 76
+	float cloud_ceiling; // 80
+	float cloud_coverage; // 84
+	float detail_strength; // 88
+	float detail_power; // 92
+	float curl_strength; // 96
+	float density; // 100, extinction per metre at a cloud density of 1
+	float pad1; // 104
+	float pad2; // 108
+};
+
+layout(set = 0, binding = 15, std140) uniform Layers {
+	CloudLayer layers[MAX_LAYERS];
+} cloud_layers;
+
+#ifdef CLOUD_SHADOWS
+// SHADOW_BYTES in SunshineClouds3.gd.
+layout(set = 0, binding = 19, std140) uniform Shadow {
+	mat4 light_to_world; // 0
+	mat4 world_to_light; // 64
+	float extent; // 128, metres the map covers around the camera (and repeats every)
+	int resolution; // 132
+	float strength; // 136
+	float sharpness; // 140
+	vec3 camera_light; // 144, the camera in light space
+	int steps; // 156
+	float march_floor; // 160, world height of the bottom of the lowest layer
+	float march_length; // 164, along the sun from there (0: sun too low)
+	int screen_space; // 168
+	float screen_space_strength; // 172
+	float fade_start; // 176
+	vec3 reserved; // 192
+} shadow;
+#endif
+
+// Cloud distance (m) from a raymarch or history texel's light absorption and absorption weighted
+// distance (km); max_distance where it holds no cloud.
+float cloud_distance(float absorption, float weighted_distance) {
+	return absorption > 0.0 ? clamp(weighted_distance / absorption * 1000.0, 0.0, params.max_distance) : params.max_distance;
+}
+
+bool spherical_planet() {
+	return params.planet.w > 0.0;
+}
+
+// World position (m) relative to the planet centre (via the camera's, which the CPU works out).
+vec3 planet_offset(vec3 world) {
+	return world - params.camera_to_world[3].xyz + params.planet.xyz;
+}
+
+// The height (m) the layers and shadows are placed by: world Y, or on a spherical planet the
+// altitude above its surface.
+float planet_height(vec3 world) {
+	return spherical_planet() ? length(planet_offset(world)) - params.planet_radius * 1000.0 : world.y;
+}
+
+vec3 planet_up(vec3 world) {
+	return spherical_planet() ? normalize(planet_offset(world)) : vec3(0.0, 1.0, 0.0);
+}
+
+// Where a ray crosses height (as planet_height()), t0 <= t1: the sphere's two crossings, or the
+// plane's (both the same) when flat. False when it misses.
+bool height_crossings(vec3 origin, vec3 direction, float height, out float t0, out float t1) {
+	if (!spherical_planet()) {
+		t0 = (height - origin.y) / direction.y;
+		t1 = t0;
+		return abs(direction.y) >= 1e-6;
+	}
+	// The stable quadratic: c is formed from the altitude difference, not two ~6e6 m squares.
+	vec3 offset = planet_offset(origin);
+	float distance = length(offset);
+	float radius = params.planet_radius * 1000.0 + height;
+	float b = dot(offset, direction);
+	float c = (distance - radius) * (distance + radius);
+	float discriminant = b * b - c;
+	float q = -(b + (b < 0.0 ? -1.0 : 1.0) * sqrt(max(discriminant, 0.0)));
+	if (discriminant < 0.0 || abs(q) < 1e-6) {
+		t0 = 0.0;
+		t1 = 0.0;
+		return false;
+	}
+	t0 = min(q, c / q);
+	t1 = max(q, c / q);
+	return true;
+}
+
+// World position (m) -> atmosphere position (km, planet centre at the origin). The flat world is
+// wrapped onto the planet around the camera, keeping altitude and horizontal distance; a spherical
+// one is the planet already.
+vec3 atmosphere_position(vec3 world) {
+	if (spherical_planet()) {
+		return planet_offset(world) * 0.001;
+	}
+	float bottom_radius = params.planet_radius;
+	float radius = bottom_radius + (world.y - params.ground_height) * 0.001;
+	vec2 offset = (world.xz - params.camera_to_world[3].xz) * 0.001;
+	float distance = length(offset);
+	if (distance < 1e-6) {
+		return vec3(0.0, radius, 0.0);
+	}
+	float angle = distance / bottom_radius;
+	vec2 horizontal = offset / distance * sin(angle);
+	return radius * vec3(horizontal.x, cos(angle), horizontal.y);
+}
+
+// Distance (m) to the opaque scene at a pixel; 0 where nothing was drawn (reverse Z).
+float surface_distance(ivec2 pixel) {
+	float depth = texelFetch(depth_texture, pixel, 0).r;
+	if (depth <= 0.0) {
+		return 0.0;
+	}
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_size);
+	vec4 scene_view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+	return length(scene_view.xyz / scene_view.w);
+}
+
+// The clouds' range from a surface_distance(): up to the opaque scene, or max_distance.
+float scene_distance(float surface) {
+	return surface > 0.0 ? min(params.max_distance, surface) : params.max_distance;
+}
+
+float scene_distance(ivec2 pixel) {
+	return scene_distance(surface_distance(pixel));
+}
+
+void camera_ray(ivec2 pixel, out vec3 ray_origin, out vec3 ray_direction) {
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_size);
+	vec4 far_view = params.inv_projection * vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+	ray_direction = normalize(mat3(params.camera_to_world) * normalize(far_view.xyz / far_view.w));
+	ray_origin = params.camera_to_world[3].xyz;
+}
+
+void camera_ray(ivec2 pixel, out vec3 ray_origin, out vec3 ray_direction, out float max_distance) {
+	camera_ray(pixel, ray_origin, ray_direction);
+	max_distance = scene_distance(pixel);
+}
+
+// The wind delta to reproject a cloud point distance (m) from the camera by: that of the layer
+// nearest its height, faded out nearer than wind_reprojection_distance, where a frame's wind is a
+// big screen jump (ghosting) over cloud that hardly changes in it.
+vec3 reprojection_wind_delta(vec3 cloud_world, float distance) {
+	vec3 wind_delta = vec3(0.0);
+	float nearest = 1e30;
+	float height = planet_height(cloud_world);
+	for (int i = 0; i < params.layer_count; i++) {
+		float gap = max(max(cloud_layers.layers[i].cloud_floor - height, height - cloud_layers.layers[i].cloud_ceiling), 0.0);
+		if (gap < nearest) {
+			nearest = gap;
+			wind_delta = cloud_layers.layers[i].wind_delta;
+		}
+	}
+	float fade = params.wind_reprojection_distance > 0.0 ? clamp(distance / params.wind_reprojection_distance, 0.0, 1.0) : 1.0;
+	return wind_delta * fade;
+}
+
+// The history (both textures; history_b's r is the scene distance in km) at uv, bilinear over the
+// 2x2 texels around it but only from texels whose scene distance last frame was near distance, so
+// nothing bleeds across silhouettes. valid is false when no texel matches.
+vec4 sample_history(sampler2D history, sampler2D history_b, vec2 uv, float distance, out vec4 value_b, out bool valid) {
+	ivec2 size = ivec2(params.screen_size);
+	vec2 position = uv * vec2(size) - 0.5;
+	ivec2 base = ivec2(floor(position));
+	vec2 f = position - vec2(base);
+	vec4 sum = vec4(0.0);
+	vec4 sum_b = vec4(0.0);
+	float weight_sum = 0.0;
+	for (int i = 0; i < 4; i++) {
+		ivec2 offset = ivec2(i & 1, i >> 1);
+		ivec2 texel = clamp(base + offset, ivec2(0), size - 1);
+		vec4 texel_b = texelFetch(history_b, texel, 0);
+		float texel_distance = texel_b.r * 1000.0;
+		if (min(texel_distance, distance) < 0.5 * max(texel_distance, distance)) {
+			continue;
+		}
+		vec2 bilinear = mix(1.0 - f, f, vec2(offset));
+		float weight = bilinear.x * bilinear.y;
+		sum += texelFetch(history, texel, 0) * weight;
+		sum_b += texel_b * weight;
+		weight_sum += weight;
+	}
+	valid = weight_sum > 1e-4;
+	value_b = valid ? sum_b / weight_sum : vec4(0.0);
+	return valid ? sum / weight_sum : vec4(0.0);
+}
+
+// PCG3D hash (Jarzynski and Olano 2020).
+uvec3 pcg3d(uvec3 v) {
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * v.z;
+	v.y += v.z * v.x;
+	v.z += v.x * v.y;
+	v ^= v >> 16u;
+	v.x += v.y * v.z;
+	v.y += v.z * v.x;
+	v.z += v.x * v.y;
+	return v;
+}
+
+ivec2 raymarch_size() {
+	int divisor = params.raymarch_resolution;
+	return (ivec2(params.screen_size) + divisor - 1) / divisor;
+}
+
+// The full resolution pixel a raymarch texel traces this frame: one of its N x N block, picked by
+// white noise per block and frame.
+ivec2 traced_pixel(ivec2 texel) {
+	int divisor = params.raymarch_resolution;
+	uint hash = pcg3d(uvec3(uvec2(texel), params.frame ^ 0x9E3779B9u)).z;
+	ivec2 offset = ivec2(int(hash % uint(divisor)), int((hash / uint(divisor)) % uint(divisor)));
+	return min(texel * divisor + offset, ivec2(params.screen_size) - 1);
+}

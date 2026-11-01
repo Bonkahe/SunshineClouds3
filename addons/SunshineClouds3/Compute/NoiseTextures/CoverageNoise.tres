@@ -1,0 +1,14 @@
+[gd_resource type="NoiseTexture2D" format=3 uid="uid://baxkddadw7emi"]
+
+[sub_resource type="Gradient" id="Gradient_lebqt"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_coverage"]
+frequency = 0.0039
+
+[resource]
+width = 1024
+height = 1024
+noise = SubResource("FastNoiseLite_coverage")
+color_ramp = SubResource("Gradient_lebqt")
+seamless = true
+seamless_blend_skirt = 0.3

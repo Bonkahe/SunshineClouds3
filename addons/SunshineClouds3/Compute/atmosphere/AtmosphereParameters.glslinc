@@ -1,0 +1,42 @@
+// ATMOSPHERE for Bruneton's functions, from a uniform buffer; see AtmosphereHeader.glslinc.
+
+// AtmosphereParameters, std140, 304 bytes. Density profile layers take two vec4 each:
+// (width, exp_term, exp_scale, linear_term), (constant_term, -, -, -).
+layout(set = 0, binding = ATMOSPHERE_BINDING, std140) uniform AtmosphereBuffer {
+	vec4 solar_irradiance; // xyz, w = sun angular radius
+	vec4 radii; // x = bottom radius, y = top radius, z = Mie phase g, w = mu_s_min
+	vec4 rayleigh_density[4];
+	vec4 mie_density[4];
+	vec4 absorption_density[4];
+	vec4 rayleigh_scattering;
+	vec4 mie_scattering;
+	vec4 mie_extinction;
+	vec4 absorption_extinction;
+	vec4 ground_albedo;
+} atmosphere_buffer;
+
+DensityProfile atmosphere_density_profile(vec4 layer0_a, vec4 layer0_b, vec4 layer1_a, vec4 layer1_b) {
+	return DensityProfile(DensityProfileLayer[2](
+			DensityProfileLayer(layer0_a.x, layer0_a.y, layer0_a.z, layer0_a.w, layer0_b.x),
+			DensityProfileLayer(layer1_a.x, layer1_a.y, layer1_a.z, layer1_a.w, layer1_b.x)));
+}
+
+AtmosphereParameters atmosphere_parameters() {
+	return AtmosphereParameters(
+			atmosphere_buffer.solar_irradiance.xyz,
+			atmosphere_buffer.solar_irradiance.w,
+			atmosphere_buffer.radii.x,
+			atmosphere_buffer.radii.y,
+			atmosphere_density_profile(atmosphere_buffer.rayleigh_density[0], atmosphere_buffer.rayleigh_density[1], atmosphere_buffer.rayleigh_density[2], atmosphere_buffer.rayleigh_density[3]),
+			atmosphere_buffer.rayleigh_scattering.xyz,
+			atmosphere_density_profile(atmosphere_buffer.mie_density[0], atmosphere_buffer.mie_density[1], atmosphere_buffer.mie_density[2], atmosphere_buffer.mie_density[3]),
+			atmosphere_buffer.mie_scattering.xyz,
+			atmosphere_buffer.mie_extinction.xyz,
+			atmosphere_buffer.radii.z,
+			atmosphere_density_profile(atmosphere_buffer.absorption_density[0], atmosphere_buffer.absorption_density[1], atmosphere_buffer.absorption_density[2], atmosphere_buffer.absorption_density[3]),
+			atmosphere_buffer.absorption_extinction.xyz,
+			atmosphere_buffer.ground_albedo.xyz,
+			atmosphere_buffer.radii.w);
+}
+
+#define ATMOSPHERE atmosphere_parameters()

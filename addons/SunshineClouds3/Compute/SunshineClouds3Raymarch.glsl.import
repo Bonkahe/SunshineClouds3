@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://0igd472g5ucx"
+path="res://.godot/imported/SunshineClouds3Raymarch.glsl-44182fa69ce27d546237cbf29890ab1f.res"
+
+[deps]
+
+source_file="res://addons/SunshineClouds3/Compute/SunshineClouds3Raymarch.glsl"
+dest_files=["res://.godot/imported/SunshineClouds3Raymarch.glsl-44182fa69ce27d546237cbf29890ab1f.res"]
+
+[params]
+
