@@ -611,7 +611,8 @@ layout(set = 0, binding = 12) uniform sampler2D irradiance_texture;
 layout(rgba16f, set = 0, binding = 31) uniform restrict writeonly image2D skybox_image;
 
 // The planet's ground below the horizon (sky_settings.skybox_ground_albedo, lit by the sun and the sky)
-// seen from camera (atmosphere position) along view, with the air in front of it.
+// seen from camera (atmosphere position) along view, with the air in front of it. The sky's light
+// on it and the air's are times atmosphere_tint.
 vec3 ground_radiance(AtmosphereParameters atmosphere, vec3 camera, vec3 view) {
 	float r = length(camera);
 	float rmu = dot(camera, view);
@@ -623,7 +624,8 @@ vec3 ground_radiance(AtmosphereParameters atmosphere, vec3 camera, vec3 view) {
 	vec3 transmittance;
 	vec3 glow;
 	vec3 in_scatter = sky_radiance_to_point_parts(atmosphere, camera, point, transmittance, glow);
-	return sky_settings.skybox_ground_albedo / PI * (sun_irradiance + sky_irradiance) * transmittance + in_scatter + glow;
+	return sky_settings.skybox_ground_albedo / PI * (sun_irradiance + sky_irradiance * sky_settings.atmosphere_tint) * transmittance
+			+ (in_scatter + glow) * sky_settings.atmosphere_tint;
 }
 
 // The clouds along direction from ray_origin, far coarser than the view raymarch: skybox_cloud_steps
@@ -712,8 +714,9 @@ float skybox_clouds(vec3 ray_origin, vec3 direction, float jitter, out vec3 clou
 	// The ambient as the resolve adds it: the sky irradiance at the cloud as an average radiance.
 	vec3 point = atmosphere_position(ray_origin + direction * distance_to_cloud);
 	float r = length(point);
-	vec3 sky_light = GetIrradiance(ATMOSPHERE, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale;
-	cloud_light = direct_light + amb_intensity * sky_light * params.ambient_color * params.ambient_energy;
+	vec3 sky_light = GetIrradiance(ATMOSPHERE, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale
+			* sky_settings.atmosphere_tint;
+	cloud_light = (direct_light + amb_intensity * sky_light * params.ambient_color * params.ambient_energy) * sky_settings.cloud_tint;
 	return light_absorption;
 }
 

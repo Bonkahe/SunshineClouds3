@@ -1,0 +1,120 @@
+[gd_scene format=3 uid="uid://bqkxtxa11viy0"]
+
+[ext_resource type="NoiseTexture3D" uid="uid://d3gmnswewxfoc" path="res://addons/SunshineClouds3/Compute/NoiseTextures/CompositePerlin.tres" id="1_evsth"]
+[ext_resource type="NoiseTexture3D" uid="uid://bw2f0gntu1x75" path="res://addons/SunshineClouds3/Compute/NoiseTextures/CompositePerlinWorley.tres" id="2_4ax34"]
+[ext_resource type="NoiseTexture3D" uid="uid://b2cm35s7bqp3a" path="res://addons/SunshineClouds3/Compute/NoiseTextures/CompositeWorleyA.tres" id="3_kh5ej"]
+[ext_resource type="NoiseTexture3D" uid="uid://3nkxrfkyfs4m" path="res://addons/SunshineClouds3/Compute/NoiseTextures/CompositeWorleyB.tres" id="4_xcc82"]
+[ext_resource type="NoiseTexture3D" uid="uid://cn0ug7o5vleqk" path="res://addons/SunshineClouds3/Compute/NoiseTextures/CompositeWorleyG.tres" id="5_n878i"]
+[ext_resource type="Texture2D" uid="uid://baxkddadw7emi" path="res://addons/SunshineClouds3/Compute/NoiseTextures/CoverageNoise.tres" id="6_jtj3x"]
+[ext_resource type="CompressedTexture3D" uid="uid://ceqyx438urppv" path="res://addons/SunshineClouds3/Compute/NoiseTextures/curl_noise_packed.png" id="7_l3rnv"]
+[ext_resource type="Script" uid="uid://cnh5toiuralja" path="res://addons/SunshineClouds3/Resources/CloudLayer.gd" id="8_4u0wx"]
+[ext_resource type="ImageTexture3D" uid="uid://c8p758oj63aqx" path="res://addons/SunshineClouds3/Compute/NoiseTextures/NoiseComposite.res" id="9_1orqi"]
+[ext_resource type="Script" uid="uid://c7hwen2bl73wi" path="res://addons/SunshineClouds3/SunshineClouds3.gd" id="10_sxr5o"]
+[ext_resource type="Script" uid="uid://ciwtkox7cf2er" path="res://addons/SunshineClouds3/SunshineClouds3Driver.gd" id="11_u3hs6"]
+[ext_resource type="Script" uid="uid://cg2nybl8tbgrp" path="res://addons/SunshineClouds3/Resources/CloudDirectionalLightSettings.gd" id="12_dolbb"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_bej8n"]
+sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+ground_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
+
+[sub_resource type="Sky" id="Sky_npcgs"]
+sky_material = SubResource("ProceduralSkyMaterial_bej8n")
+
+[sub_resource type="Environment" id="Environment_ob8ie"]
+background_mode = 2
+sky = SubResource("Sky_npcgs")
+glow_enabled = true
+
+[sub_resource type="Curve" id="Curve_wavrw"]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(0.07081545, 0), -0.45368385, 0.062191937, 0, 0]
+point_count = 2
+
+[sub_resource type="Curve" id="Curve_hhe36"]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.46296299), 0.0, 0.0, 0, 0]
+point_count = 2
+
+[sub_resource type="Curve" id="Curve_0gupw"]
+_data = [Vector2(0, 0.01569), 16.71, 16.71, 0, 0, Vector2(0.043551087, 0.9561754), -2.5508158, -2.5508158, 0, 0, Vector2(0.12562814, 0.66135466), -1.8260871, -1.8260871, 0, 0, Vector2(0.37339056, 0.45549738), 0.0, 0.0, 0, 0, Vector2(0.884375, 0.27642274), -0.24628581, -0.24628581, 0, 0, Vector2(1, 0.003922), -2.739, -2.739, 0, 0]
+point_count = 6
+
+[sub_resource type="Resource" id="Resource_pryqw"]
+script = ExtResource("8_4u0wx")
+vertical_profile_curve = SubResource("Curve_0gupw")
+detail_curve = SubResource("Curve_hhe36")
+curl_curve = SubResource("Curve_wavrw")
+curl_noise_scale = 7340.0
+
+[sub_resource type="CompositorEffect" id="CompositorEffect_18kiu"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 3
+access_resolved_color = false
+access_resolved_depth = false
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("10_sxr5o")
+layers = Array[ExtResource("8_4u0wx")]([SubResource("Resource_pryqw")])
+coverage = 0.515
+planet_radius = 100.0
+spherical_planet = true
+planet_center = Vector3(0, -100000, 0)
+near_step_size = 5.0
+far_step_size_offset = 300.0
+step_adjustment_distance = 26741.0
+has_last_directional = true
+last_directional_directions = PackedVector3Array(0.7383478, 0.51651394, -0.43365428)
+last_directional_radiance = PackedVector3Array(1, 1, 1)
+last_directional_samples = PackedInt32Array(4)
+last_sun_direction = Vector3(0.7383478, 0.51651394, -0.43365428)
+
+[sub_resource type="Compositor" id="Compositor_dci70"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_18kiu")])
+
+[sub_resource type="Resource" id="Resource_kf85k"]
+script = ExtResource("12_dolbb")
+drive_light_color = false
+
+[sub_resource type="SphereMesh" id="SphereMesh_svejp"]
+radius = 500.0
+height = 1000.0
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_svejp"]
+top_radius = 100.0
+bottom_radius = 100.0
+height = 5000.0
+
+[node name="DemoScene" type="Node3D" unique_id=1070852390]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1609251193]
+environment = SubResource("Environment_ob8ie")
+compositor = SubResource("Compositor_dci70")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=751721016]
+transform = Transform3D(-0.6740462, -0.022458432, 0.7383479, 0.5437479, 0.6614769, 0.5165139, -0.50000006, 0.74962926, -0.43365425, 0, 0, 0)
+shadow_enabled = true
+directional_shadow_max_distance = 10000.0
+
+[node name="SunshineClouds3Driver" type="Node" parent="." unique_id=246151851 node_paths=PackedStringArray("world_environment")]
+script = ExtResource("11_u3hs6")
+clouds_resource = SubResource("CompositorEffect_18kiu")
+world_environment = NodePath("../WorldEnvironment")
+iterate_wind_in_editor = true
+directional_lights = Array[NodePath]([NodePath("../DirectionalLight3D")])
+directional_light_settings = Array[ExtResource("12_dolbb")]([SubResource("Resource_kf85k")])
+
+[node name="PlanetSphere" type="MeshInstance3D" parent="." unique_id=645594087]
+transform = Transform3D(200, 0, 0, 0, 200, 0, 0, 0, 200, 0, -100000, 0)
+mesh = SubResource("SphereMesh_svejp")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=1074679493]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2500, 0)
+mesh = SubResource("CylinderMesh_svejp")
+
+[node name="MeshInstance3D2" type="MeshInstance3D" parent="." unique_id=850340812]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5000, 2500, 0)
+mesh = SubResource("CylinderMesh_svejp")
+
+[node name="MeshInstance3D3" type="MeshInstance3D" parent="." unique_id=1095987976]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10000, 2500, 0)
+mesh = SubResource("CylinderMesh_svejp")

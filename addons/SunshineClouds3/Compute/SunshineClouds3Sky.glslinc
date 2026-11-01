@@ -13,6 +13,10 @@ layout(set = 0, binding = 29, std140) uniform SkySettings {
 	float skybox_cloud_distance; // 100, how far the skybox marches the clouds (m)
 	int skybox_cloud_steps; // 104, view steps through the layers (0 = no clouds)
 	int skybox_cloud_light_steps; // 108, steps towards each directional light
+	vec3 atmosphere_tint; // 112, multiplies the atmosphere's own light (not the sunlight through it)
+	float reserved_124; // 124
+	vec3 cloud_tint; // 128, multiplies the clouds' light
+	float reserved_140; // 140
 } sky_settings;
 
 // An equirectangular panorama, laid out as Godot's SKY_COORDS (PanoramaSkyMaterial).
@@ -62,7 +66,7 @@ vec3 sky_radiance_to_point_parts(AtmosphereParameters atmosphere, vec3 camera, v
 }
 
 // The light a view ray picks up through the atmosphere on its way to a world distance (m), in scene
-// units, and its transmittance. glow_scale scales the sun's glow in it.
+// units and times atmosphere_tint, and its transmittance. glow_scale scales the sun's glow in it.
 vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, out vec3 transmittance) {
 	AtmosphereParameters atmosphere = ATMOSPHERE;
 	float distance_km = distance * 0.001;
@@ -104,14 +108,14 @@ vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float di
 	}
 	float fraction = distance_km / evaluated_km;
 	transmittance = pow(transmittance, vec3(fraction));
-	return in_scatter * fraction * params.radiance_scale;
+	return in_scatter * fraction * params.radiance_scale * sky_settings.atmosphere_tint;
 }
 
 // The sky's light towards ray_origin (world) from ray_direction, before radiance_scale: the
-// scattering, the sun's glow, and its disc scaled by sun_disc. No planet ground: the scene's
-// terrain is the ground, so rays below the horizon are lifted to just above it, keeping their
-// angle to the sun so the glow around a low sun stays a round halo. transmittance is the ray's to
-// space (0 below the horizon, where nothing behind the sky shows).
+// scattering and the sun's glow times atmosphere_tint, and its disc scaled by sun_disc. No planet
+// ground: the scene's terrain is the ground, so rays below the horizon are lifted to just above it,
+// keeping their angle to the sun so the glow around a low sun stays a round halo. transmittance is
+// the ray's to space (0 below the horizon, where nothing behind the sky shows).
 vec3 sky_radiance(vec3 ray_origin, vec3 ray_direction, float sun_disc, out vec3 transmittance) {
 	AtmosphereParameters atmosphere = ATMOSPHERE;
 	vec3 sun_direction = params.sun_direction;
@@ -160,12 +164,14 @@ vec3 sky_radiance(vec3 ray_origin, vec3 ray_direction, float sun_disc, out vec3 
 				r, mu, mu_s, nu, ray_r_mu_intersects_ground, single_mie_scattering) * RayleighPhaseFunction(nu);
 		glow = single_mie_scattering * MiePhaseFunction(atmosphere.mie_phase_function_g, nu);
 	}
+	// The disc is the sun's own light, so it stays out of the tint.
+	vec3 disc = vec3(0.0);
 	if (below_horizon) {
 		transmittance = vec3(0.0);
 	} else if (dot(ray_direction, sun_direction) > cos(atmosphere.sun_angular_radius)) {
-		glow += transmittance * sun_disc * atmosphere.solar_irradiance / (PI * atmosphere.sun_angular_radius * atmosphere.sun_angular_radius);
+		disc = transmittance * sun_disc * atmosphere.solar_irradiance / (PI * atmosphere.sun_angular_radius * atmosphere.sun_angular_radius);
 	}
-	return radiance + glow;
+	return (radiance + glow) * sky_settings.atmosphere_tint + disc;
 }
 
 // The background's light from ray_direction, through transmittance (the atmosphere's to space),

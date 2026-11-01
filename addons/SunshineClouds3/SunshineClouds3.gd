@@ -19,7 +19,7 @@ const SAMPLE_BUFFER_BYTES := MAX_SAMPLE_POINTS * 16
 const SHADOW_BYTES := 208
 const PARAMS_BYTES := 368
 const ATMOSPHERE_BYTES := 304
-const SKY_BYTES := 112
+const SKY_BYTES := 144
 
 ## Can be changed but you will have to acocunt for it in the SunshineClouds3Common.glslinc
 const MAX_LAYERS := 8 
@@ -76,6 +76,9 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 @export_range(0.0, 1.0) var density: float = 0.611
 
 @export_group("Direct Scattering")
+## Multiplies the clouds' light, every light's direct light and the ambient, on screen and in the
+## skybox. White leaves them as lit.
+@export_color_no_alpha var cloud_tint : Color = Color.WHITE
 ## Scales every directional light's energy on the clouds.
 @export_range(0.0, 10.0, 0.01, "or_greater") var directional_energy_multiplier : float = 5.74
 ## Scales every omni light's energy on the clouds.
@@ -118,6 +121,83 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 ## Scales the extinction the density-aware ambient is occluded by: lower lets it reach further
 ## into the cloud.
 @export_range(0.0, 1.0, 0.0001, "or_greater") var ambient_extinction_scale : float = 0.1861
+
+
+@export_group("Atmosphere")
+
+@export var atmosphere_enabled : bool = true
+
+## Multiplies the atmosphere's own light: the sky (not the sun's disc), the haze over the scene and
+## in front of the clouds, and the sky light on the clouds and the skybox's ground.
+@export_color_no_alpha var atmosphere_tint : Color = Color.WHITE
+
+@export_range(0.0, 100.0, 0.01, "or_greater") var radiance_scale : float = 1.0
+## World Y of the planet surface.
+@export var ground_height : float = 0.0
+
+@export_range(0.01, 10.0, 0.01, "or_greater") var atmospheric_density : float = 3.0:
+	set(value):
+		atmospheric_density = value
+		atmosphere_changed = true
+
+@export_subgroup("Advanced")
+@export_range(100.0, 100000.0, 1.0, "or_greater", "suffix:km") var planet_radius : float = 6360.0:
+	set(value):
+		planet_radius = value
+		atmosphere_changed = true
+@export_range(1.0, 1000.0, 0.1, "or_greater", "suffix:km") var atmosphere_height : float = 60.0:
+	set(value):
+		atmosphere_height = value
+		atmosphere_changed = true
+@export_range(100.0, 100000.0, 1.0, "or_greater", "suffix:m") var rayleigh_scale_height : float = 8000.0:
+	set(value):
+		rayleigh_scale_height = value
+		atmosphere_changed = true
+@export_range(10.0, 100000.0, 1.0, "or_greater", "suffix:m") var mie_scale_height : float = 1200.0:
+	set(value):
+		mie_scale_height = value
+		atmosphere_changed = true
+## Aerosol amount (Angstrom turbidity beta); higher is hazier.
+@export_range(0.0, 0.1, 0.0001, "or_greater") var mie_angstrom_beta : float = 5.328e-3:
+	set(value):
+		mie_angstrom_beta = value
+		atmosphere_changed = true
+@export_range(0.0, 1.0, 0.01) var mie_single_scattering_albedo : float = 0.9:
+	set(value):
+		mie_single_scattering_albedo = value
+		atmosphere_changed = true
+## Cornette-Shanks g of the aerosols.
+@export_range(-0.99, 0.99, 0.01) var mie_phase_g : float = 0.93:
+	set(value):
+		mie_phase_g = value
+		atmosphere_changed = true
+## Albedo of the planet ground in the precomputed scattering (the ground itself isn't drawn).
+@export_range(0.0, 2.0, 0.01) var ground_albedo : float = 1.0:
+	set(value):
+		ground_albedo = value
+		atmosphere_changed = true
+@export var ozone : bool = true:
+	set(value):
+		ozone = value
+		atmosphere_changed = true
+@export_range(0.0001, 0.1, 0.0001, "suffix:rad") var sun_angular_radius : float = 0.0156:
+	set(value):
+		sun_angular_radius = value
+		atmosphere_changed = true
+@export_range(1, 8) var scattering_orders : int = 8:
+	set(value):
+		scattering_orders = value
+		atmosphere_changed = true
+
+@export_group("Spherical Planet Settings")
+## Curves the cloud layers, the atmosphere and the cloud shadows around a sphere of planet_radius
+## at planet_center: their heights become altitudes above its surface (ground_height is unused).
+## Off, they're flat along world Y, as around a planet at (0, -planet_radius, 0).
+## There are incompatablities with this feature, this stops coverage noise from working, as that is still in world space xy, recommended you disable that if you enable this feature.
+## It also stops the driving of the directional light color from being accurate as well, as when the sun is on the other side of the planet from you, it will be red when it should still be white (Or whatever you have it set to).
+@export var spherical_planet : bool = false
+## World position of the planet's centre, with spherical_planet.
+@export var planet_center : Vector3 = Vector3(0.0, -6360000.0, 0.0)
 
 @export_group("Quality")
 ## Step size at the camera: near_step_size + far_step_size_offset * distance / step_adjustment_distance.
@@ -172,77 +252,6 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 @export_subgroup("Screen Space")
 @export_range(0.0, 1.0, 0.01) var screen_space_shadow_strength : float = 0.6
 @export_range(0.0, 1.0, 0.01) var screen_space_shadow_fade : float = 0.7
-
-@export_group("Atmosphere")
-
-@export var atmosphere_enabled : bool = true
-@export_range(0.0, 100.0, 0.01, "or_greater") var radiance_scale : float = 1.0
-## World Y of the planet surface.
-@export var ground_height : float = 0.0
-
-@export_range(0.01, 10.0, 0.01, "or_greater") var atmospheric_density : float = 3.0:
-	set(value):
-		atmospheric_density = value
-		atmosphere_changed = true
-
-@export_subgroup("Planet")
-## Curves the cloud layers, the atmosphere and the cloud shadows around a sphere of planet_radius
-## at planet_center: their heights become altitudes above its surface (ground_height is unused).
-## Off, they're flat along world Y, as around a planet at (0, -planet_radius, 0).
-## There are incompatablities with this feature, this stops coverage noise from working, as that is still in world space xy, recommended you disable that if you enable this feature.
-## It also stops the driving of the directional light color from being accurate as well, as when the sun is on the other side of the planet from you, it will be red when it should still be white (Or whatever you have it set to).
-@export var spherical_planet : bool = false
-## World position of the planet's centre, with spherical_planet.
-@export var planet_center : Vector3 = Vector3(0.0, -6360000.0, 0.0)
-
-@export_subgroup("Advanced")
-@export_range(100.0, 100000.0, 1.0, "or_greater", "suffix:km") var planet_radius : float = 6360.0:
-	set(value):
-		planet_radius = value
-		atmosphere_changed = true
-@export_range(1.0, 1000.0, 0.1, "or_greater", "suffix:km") var atmosphere_height : float = 60.0:
-	set(value):
-		atmosphere_height = value
-		atmosphere_changed = true
-@export_range(100.0, 100000.0, 1.0, "or_greater", "suffix:m") var rayleigh_scale_height : float = 8000.0:
-	set(value):
-		rayleigh_scale_height = value
-		atmosphere_changed = true
-@export_range(10.0, 100000.0, 1.0, "or_greater", "suffix:m") var mie_scale_height : float = 1200.0:
-	set(value):
-		mie_scale_height = value
-		atmosphere_changed = true
-## Aerosol amount (Angstrom turbidity beta); higher is hazier.
-@export_range(0.0, 0.1, 0.0001, "or_greater") var mie_angstrom_beta : float = 5.328e-3:
-	set(value):
-		mie_angstrom_beta = value
-		atmosphere_changed = true
-@export_range(0.0, 1.0, 0.01) var mie_single_scattering_albedo : float = 0.9:
-	set(value):
-		mie_single_scattering_albedo = value
-		atmosphere_changed = true
-## Cornette-Shanks g of the aerosols.
-@export_range(-0.99, 0.99, 0.01) var mie_phase_g : float = 0.93:
-	set(value):
-		mie_phase_g = value
-		atmosphere_changed = true
-## Albedo of the planet ground in the precomputed scattering (the ground itself isn't drawn).
-@export_range(0.0, 2.0, 0.01) var ground_albedo : float = 1.0:
-	set(value):
-		ground_albedo = value
-		atmosphere_changed = true
-@export var ozone : bool = true:
-	set(value):
-		ozone = value
-		atmosphere_changed = true
-@export_range(0.0001, 0.1, 0.0001, "suffix:rad") var sun_angular_radius : float = 0.0156:
-	set(value):
-		sun_angular_radius = value
-		atmosphere_changed = true
-@export_range(1, 8) var scattering_orders : int = 8:
-	set(value):
-		scattering_orders = value
-		atmosphere_changed = true
 
 @export_group("Background")
 ## An equirectangular panorama behind the atmosphere (laid out as PanoramaSkyMaterial's): stars and
@@ -1525,7 +1534,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		var background_basis := Basis.from_euler(background_rotation * (PI / 180.0)).inverse()
 		var sky_key_now := [has_background, background_color, background_energy, background_fade_brightness, background_basis,
 			background_skybox_energy, skybox_ground_color, background_rid, radiance_scale, ground_height, skybox_energy, skybox_cloud_dimming, coverage,
-			density, skybox_clouds, skybox_cloud_steps, skybox_cloud_light_steps, skybox_cloud_distance]
+			density, skybox_clouds, skybox_cloud_steps, skybox_cloud_light_steps, skybox_cloud_distance, atmosphere_tint, cloud_tint]
 		if sky_key_now != sky_settings_key:
 			sky_settings_key = sky_key_now
 			# The skybox shows the new settings at once.
@@ -1539,6 +1548,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			sky_bytes.encode_float(100, skybox_cloud_distance)
 			sky_bytes.encode_s32(104, skybox_cloud_steps if skybox_clouds else 0)
 			sky_bytes.encode_s32(108, skybox_cloud_light_steps)
+			var atmosphere_linear := atmosphere_tint.srgb_to_linear()
+			_encode_vec4(sky_bytes, 112, Vector3(atmosphere_linear.r, atmosphere_linear.g, atmosphere_linear.b), 0.0)
+			var cloud_linear := cloud_tint.srgb_to_linear()
+			_encode_vec4(sky_bytes, 128, Vector3(cloud_linear.r, cloud_linear.g, cloud_linear.b), 0.0)
 			rd.buffer_update(sky_buffer, 0, SKY_BYTES, sky_bytes)
 
 	if noise_stats_texture != noise_texture:

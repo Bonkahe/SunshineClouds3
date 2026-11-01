@@ -2,9 +2,9 @@
 
 Raymarched volumetric clouds and a physically based atmosphere for Godot 4, built as a compositor effect.
 
-SunshineClouds 3 is a ground-up rewrite of [SunshineClouds 2](https://github.com/Bonkahe/SunshineClouds2). It keeps what people liked about SC2: clouds you can fly through, soft or stylized looks, and a quick setup. On top of that it adds stacked cloud layers, a precomputed sky and atmosphere, a generated skybox for reflections and ambient light, a spherical planet mode, and cloud shadows cast through Godot's own lights.
+SunshineClouds 3 is a complete rebuild of [SunshineClouds 2](https://github.com/Bonkahe/SunshineClouds2). I tried to implement a lot of the features people were wanting with the previous one (layers, multiple cameras/VR support, less edge artifacts and generally just easier implementation/startup)
 
-> **Early days:** SunshineClouds 3 is still in development (currently v0.2). Settings and defaults may change between versions, and a couple of SC2 features have not been brought over yet. See [Not yet implemented](#not-yet-implemented).
+> **NOTE:** SunshineClouds 3 is still in pretty early development (currently not even in the asset library/store). Settings and defaults may change between versions, and a couple of core features have not been brought over yet from sunshine clouds 2. See [Not yet implemented](#not-yet-implemented).
 
 ## What it's for
 
@@ -13,11 +13,15 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 * **Open worlds and flight games** where the player flies up to, through and above the clouds, and sees them stretch out to the horizon.
 * **Day/night cycles** where the sky, the clouds, the sunlight color and the scene's ambient light all need to agree with each other as the sun moves.
 * **Large or planetary scale scenes**, with clouds and atmosphere that can curve around a planet instead of sitting on a flat plane.
-* **Stylized games** that want soft, painterly or cartoony volumetric clouds rather than realistic ones. The lighting, phase and density settings cover a wide range of looks.
+
+## What it's **NOT** for
+
+* **Games which entirely are based on the ground** certainly you can use the clouds here, and depending on your game it may very well bring better visuals, but I cannot recommend it for games which do not *require* volumetric clouds, the performance cost is almost universally not worth it.
+* **Smaller games or games that have specific and cultivated play areas** even if these games take place in the sky, if you are making a FPS for example which had arena levels on a platform in the sky, you are going to get much better mileage from just good art design and some geometric shapes with painted on clouds.
 
 ## Features
 
-### Clouds
+### The Clouds
 * Fully volumetric clouds. You can fly through them, and they render out to the horizon (150 km by default, adjustable).
 * Up to **8 cloud layers**. Each layer has its own floor, ceiling, density, noise scales and wind speeds, so cumulus, stratus and high cirrus-like decks can share a sky.
 * Per-layer **height profile curves** for cloud shape, detail strength and curl strength over the height of the layer.
@@ -32,22 +36,22 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 * Density-aware ambient lighting, with sky light from above and ground bounce from below, dimmed through the cloud. Dense cores darken and thin wisps stay lit.
 * `SunshineOmniLight`: an omni light with its own cloud radius that can light **only the clouds**. Good for lightning, explosions or city glow seen from above.
 * Optional **driven sun color**: the driver tints your directional light by the atmosphere at the camera, so the whole scene warms and dims toward sunset along with the sky.
-* A configurable fallback light, so the clouds still look right before any lights are connected.
 
 ### Atmosphere and sky
 * Precomputed atmospheric scattering (Rayleigh, Mie and ozone, multiple scattering orders), based on Eric Bruneton's model. Fully adjustable: planet radius, atmosphere height, haze, scattering heights and more.
-* **Skybox generation**: renders the atmosphere, background and a coarse pass of the clouds into a panorama and uses it as your `WorldEnvironment`'s sky. Reflections and ambient light follow the time of day and the cloud cover, in the editor too.
+* **Skybox generation**: renders the atmosphere, background and a coarse pass of the clouds into a panorama and uses it as your `WorldEnvironment`'s sky. Reflections and ambient light follow the time of day and the cloud cover.
 * **Background panorama** behind the atmosphere (stars, nebulae and so on). It fades in as the sky darkens and can be rotated to move the stars through the night.
-* **Spherical planet mode**: curves the cloud layers, atmosphere and shadows around a planet center, for scenes that go up to orbit or cover planetary distances.
+* **Spherical planet mode**: curves the cloud layers, atmosphere and shadows around a planet center, for scenes that go up to orbit or cover planetary distances. This is still a bit work in progress, and isn't compatable with some features like coverage noise and directional light color being driven by the clouds driver, I want to work on this, but in some ways it's dependent on the cloud shadows for making it better.
 
 ### Cloud shadows
 * Cloud shadows on the world in two modes:
   * **Light Projector**: the shadow map is projected through your directional light, so it works with Godot's own shadowing (needs an engine build with directional light projectors, see [Cloud shadows](#cloud-shadows-1)).
   * **Screen Space**: darkens opaque surfaces in the composite, ambient light included. Works on stock Godot, and is the automatic fallback.
 * Adjustable resolution, extent, strength, sharpness and horizon fade. Updates are spread across frames to save GPU time.
+* If and when the light projector is implemented into the master Godot branch we can also use this projector to tint the directional lights without actually modifying the light color, there's a lot of work that can be done there.
 
 ### Performance
-* Reduced-resolution raymarching (full, half or quarter) reconstructed to full resolution, plus optional interlacing, so only a fraction of pixels are traced each frame.
+* Reduced-resolution raymarching (full, half or quarter) reconstructed to full resolution, plus optional interlacing, so only a small fraction of pixels are traced each frame.
 * Temporal accumulation with reprojection that follows both the camera and the wind.
 * Adaptive step sizes: coarse steps through empty sky, fine steps once a ray finds cloud, and longer steps with distance.
 * Shadow maps and the skybox update every N frames and blend in between.
@@ -105,7 +109,7 @@ If you'd rather wire it up yourself:
 
 | Piece | What it does |
 | --- | --- |
-| `SunshineClouds3` | The compositor effect and its resource. All cloud, layer, lighting, atmosphere, skybox, shadow and quality settings live here. |
+| `SunshineClouds3` | The compositor effect and its resource. All cloud, layer, lighting, tint, atmosphere, skybox, shadow and quality settings live here. |
 | `CloudLayer` | One layer of clouds in the effect's *Layers* array: its height range, density, shape curves, noise scales and wind speeds. |
 | `SunshineClouds3Driver` | A node that drives the effect each frame: feeds it the scene's lights and effectors, moves the wind, puts the skybox on the environment and the shadow projector on the light. |
 | `SunshineEffector` | A `Node3D` that adds clouds (positive strength) or clears them (negative strength) inside its radius. |
@@ -146,7 +150,7 @@ clouds.remove_directional_light($Moon)
 
 ### Floating origin
 
-If your project shifts the world origin, set the driver's `origin_offset` to the offset, and the cloud noise stays put in the world.
+If your project shifts the world origin, set the driver's `origin_offset` to the offset, and the cloud noise stays put in the world. (This is SUPER expiremental, I need to revisit this)
 
 ## Cloud shadows
 
@@ -177,4 +181,4 @@ Thank you so much to all the wonderful people who support me.
 
 ## License
 
-This plugin has been released under the [MIT License](https://github.com/Bonkahe/SunshineClouds3/blob/main/LICENSE). The atmosphere code in `addons/SunshineClouds3/Compute/atmosphere` is under Eric Bruneton's BSD license, as noted above.
+This plugin has been released under the [MIT License](https://github.com/Bonkahe/SunshineClouds3/LICENSE.txt). The atmosphere code in `addons/SunshineClouds3/Compute/atmosphere` is under Eric Bruneton's BSD license, as noted above.

@@ -1,6 +1,6 @@
 [gd_resource type="NoiseTexture3D" format=3 uid="uid://bw2f0gntu1x75"]
 
-[sub_resource type="FastNoiseLite" id="FastNoiseLite_CompositePerlinWorley"]
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_u11k6"]
 noise_type = 2
 seed = 2
 frequency = 0.03
@@ -10,7 +10,7 @@ fractal_octaves = 3
 width = 128
 height = 128
 depth = 128
-noise = SubResource("FastNoiseLite_CompositePerlinWorley")
+noise = SubResource("FastNoiseLite_u11k6")
 seamless = true
 invert = true
 seamless_blend_skirt = 0.3

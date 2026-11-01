@@ -248,9 +248,11 @@ void main() {
 		if (ATMOSPHERE_ENABLED) {
 			vec3 point = atmosphere_position(ray_origin + ray_direction * distance_to_cloud);
 			float r = length(point);
-			sky_light = GetIrradiance(atmosphere, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale;
+			sky_light = GetIrradiance(atmosphere, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale
+					* sky_settings.atmosphere_tint;
 		}
-		vec3 cloud_color = result.yzw + result_b.x * sky_light * params.ambient_color * params.ambient_energy;
+		// Tinted after the accumulation, so a change shows at once.
+		vec3 cloud_color = (result.yzw + result_b.x * sky_light * params.ambient_color * params.ambient_energy) * sky_settings.cloud_tint;
 		// The air in front of the cloud is in its shadow looking towards the sun, so its glow is
 		// blocked by the cloud's opacity too.
 		vec3 transmittance;
