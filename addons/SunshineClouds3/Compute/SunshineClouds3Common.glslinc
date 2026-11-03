@@ -3,7 +3,7 @@
 
 layout(set = 0, binding = 1) uniform sampler2D depth_texture;
 
-// std140, 368 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
+// std140, 384 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
 layout(set = 0, binding = 3, std140) uniform Params {
 	// Per frame.
 	mat4 inv_projection; // 0
@@ -46,6 +46,7 @@ layout(set = 0, binding = 3, std140) uniform Params {
 	float ambient_occlusion; // 356, 0 = profile ambient, 1 = density-aware
 	float ambient_ground_strength; // 360, light from below as a fraction of the sky's
 	float ambient_extinction_scale; // 364
+	vec3 ground_color; // 368, the ambient's light from below
 } params;
 
 // Must match SunshineClouds3.gd's MAX_LAYERS.
@@ -104,6 +105,28 @@ float cloud_distance(float absorption, float weighted_distance) {
 	return absorption > 0.0 ? clamp(weighted_distance / absorption * 1000.0, 0.0, params.max_distance) : params.max_distance;
 }
 
+// Whether a cloud (light absorption, cloud distance in m) is opaque well in front of distance, so
+// nothing from there on shows through it.
+bool opaque_before(float absorption, float cloud, float distance) {
+	return absorption >= 0.99 && cloud < 0.5 * distance;
+}
+
+// Whether rays to scene distances a and b (m) hold the same cloud, one of them holding the cloud
+// given: their distances are near each other, or that cloud hides both (a far silhouette behind
+// opaque cloud changes nothing in front of it).
+bool same_cloud(float a, float b, float absorption, float cloud) {
+	float nearer = min(a, b);
+	return nearer >= 0.5 * max(a, b) || opaque_before(absorption, cloud, nearer);
+}
+
+// same_cloud, also matching when the texel's light absorption is within 0.02 of the pixel's own
+// (own_absorption, from its texels at its own distance; negative when it has none): across a far
+// silhouette the cloud in front of it hardly changes, while a near object's texel holds little of
+// the cloud behind it.
+bool same_cloud_own(float a, float b, float absorption, float cloud, float own_absorption) {
+	return same_cloud(a, b, absorption, cloud) || (own_absorption >= 0.0 && abs(absorption - own_absorption) < 0.02);
+}
+
 bool spherical_planet() {
 	return params.planet.w > 0.0;
 }
@@ -151,13 +174,16 @@ bool height_crossings(vec3 origin, vec3 direction, float height, out float t0, o
 
 // World position (m) -> atmosphere position (km, planet centre at the origin). The flat world is
 // wrapped onto the planet around the camera, keeping altitude and horizontal distance; a spherical
-// one is the planet already.
+// one is the planet already. Below the ground (a camera under ground_height, in a cave or under
+// water) it's on the ground: the atmosphere has no air there, and its lookups break under it.
 vec3 atmosphere_position(vec3 world) {
-	if (spherical_planet()) {
-		return planet_offset(world) * 0.001;
-	}
 	float bottom_radius = params.planet_radius;
-	float radius = bottom_radius + (world.y - params.ground_height) * 0.001;
+	if (spherical_planet()) {
+		vec3 position = planet_offset(world) * 0.001;
+		float length_km = length(position);
+		return length_km < bottom_radius ? position * (bottom_radius / max(length_km, 1e-6)) : position;
+	}
+	float radius = max(bottom_radius + (world.y - params.ground_height) * 0.001, bottom_radius);
 	vec2 offset = (world.xz - params.camera_to_world[3].xz) * 0.001;
 	float distance = length(offset);
 	if (distance < 1e-6) {
@@ -219,9 +245,10 @@ vec3 reprojection_wind_delta(vec3 cloud_world, float distance) {
 }
 
 // The history (both textures; history_b's r is the scene distance in km) at uv, bilinear over the
-// 2x2 texels around it but only from texels whose scene distance last frame was near distance, so
-// nothing bleeds across silhouettes. valid is false when no texel matches.
-vec4 sample_history(sampler2D history, sampler2D history_b, vec2 uv, float distance, out vec4 value_b, out bool valid) {
+// 2x2 texels around it but only from texels whose scene distance last frame was near distance (or
+// whose cloud hid both, or whose absorption matches own_absorption: see same_cloud_own; -1 for
+// none), so nothing bleeds across silhouettes. valid is false when no texel matches.
+vec4 sample_history(sampler2D history, sampler2D history_b, vec2 uv, float distance, out vec4 value_b, out bool valid, float own_absorption) {
 	ivec2 size = ivec2(params.screen_size);
 	vec2 position = uv * vec2(size) - 0.5;
 	ivec2 base = ivec2(floor(position));
@@ -232,14 +259,14 @@ vec4 sample_history(sampler2D history, sampler2D history_b, vec2 uv, float dista
 	for (int i = 0; i < 4; i++) {
 		ivec2 offset = ivec2(i & 1, i >> 1);
 		ivec2 texel = clamp(base + offset, ivec2(0), size - 1);
+		vec4 texel_value = texelFetch(history, texel, 0);
 		vec4 texel_b = texelFetch(history_b, texel, 0);
-		float texel_distance = texel_b.r * 1000.0;
-		if (min(texel_distance, distance) < 0.5 * max(texel_distance, distance)) {
+		if (!same_cloud_own(texel_b.r * 1000.0, distance, texel_value.x, cloud_distance(texel_value.x, texel_b.b), own_absorption)) {
 			continue;
 		}
 		vec2 bilinear = mix(1.0 - f, f, vec2(offset));
 		float weight = bilinear.x * bilinear.y;
-		sum += texelFetch(history, texel, 0) * weight;
+		sum += texel_value * weight;
 		sum_b += texel_b * weight;
 		weight_sum += weight;
 	}

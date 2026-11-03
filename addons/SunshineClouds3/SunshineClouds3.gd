@@ -17,7 +17,7 @@ const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMP
 const MAX_SAMPLE_POINTS := 32
 const SAMPLE_BUFFER_BYTES := MAX_SAMPLE_POINTS * 16
 const SHADOW_BYTES := 208
-const PARAMS_BYTES := 368
+const PARAMS_BYTES := 384
 const ATMOSPHERE_BYTES := 304
 const SKY_BYTES := 144
 
@@ -71,9 +71,17 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 
 @export_group("Base Settings")
 ## The overall amount of clouds in the scene, multiplies the individual layers coverage.
-@export_range(0.0, 1.0) var coverage: float = 0.463
+@export_range(0.0, 1.0) var coverage: float = 0.611
 ## The overall amount of density of the clouds, multiplies the individual layers coverage.
 @export_range(0.0, 1.0) var density: float = 0.611
+## Scales the clouds and the atmosphere as a whole: the layers' heights, the noise sizes and wind,
+## the planet and atmosphere sizes, the march and shadow distances, with the extinctions scaled
+## back so they look the same, just bigger or smaller. Effectors and omni lights keep their own
+## world sizes.
+@export_range(0.001, 10.0, 0.001, "or_greater") var cloud_scale : float = 1.0:
+	set(value):
+		cloud_scale = value
+		atmosphere_changed = true
 
 @export_group("Direct Scattering")
 ## Multiplies the clouds' light, every light's direct light and the ambient, on screen and in the
@@ -87,17 +95,17 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 ## Henyey-Greenstein g of the direct light (light that reached the sample through the cloud).
 ## Higher concentrates it forward: bright silver linings looking towards the light, darker looking
 ## away. 0.3-0.8 suits clouds.
-@export_range(0.01, 0.99, 0.01) var primary_phase_g : float = 0.35
+@export_range(0.01, 0.99, 0.01) var primary_phase_g : float = 0.08
 
 ## Henyey-Greenstein g of the multiple scattering term (the ms_volume glow inside the cloud).
 ## Bounced light has lost its direction, so keep it low: 0.0-0.3, near even in every direction,
 ## lights the side facing away from the light.
-@export_range(0.01, 0.99, 0.01) var secondary_phase_g : float = 0.11
+@export_range(0.01, 0.99, 0.01) var secondary_phase_g : float = 0.36
 
 ## ms_volume *= pow(attenuated_light, multiple_scattering_depth_power).
-@export_range(0.0, 4.0, 0.01, "or_greater") var multiple_scattering_depth_power : float = 0.07
+@export_range(0.01, 4.0, 0.001, "or_greater") var multiple_scattering_depth_power : float = 0.07
 ## ms_volume *= pow(height_fraction, multiple_scattering_height_power).
-@export_range(0.0, 4.0, 0.01, "or_greater") var multiple_scattering_height_power : float = 0.67
+@export_range(0.01, 4.0, 0.001, "or_greater") var multiple_scattering_height_power : float = 0.43
 @export_subgroup("Fallback Light")
 ## Fallback is just what's used when no lights are assigned to the driver.
 @export_range(-90.0, 90.0, 0.1, "degrees") var fallback_light_elevation : float = 50.0
@@ -111,11 +119,14 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 @export_group("Ambient Scattering")
 
 @export var ambient_color : Color = Color(1.0, 0.3889187, 0.2613985)
+## Colour of the ground bounce, the density-aware ambient's light from below (ambient_color is the
+## sky's from above).
+@export var ground_color : Color = Color(1.0, 0.3889187, 0.2613985)
 @export_range(0.0, 10.0, 0.01, "or_greater") var ambient_energy : float = 1.0
 ## 0: the ambient light follows the layer's profile only, so dark sides come out flat. 1:
 ## density-aware, sky light from above and ground light from below dimmed through the cloud, so
 ## dense cores darken and wisps stay lit.
-@export_range(0.0, 1.0, 0.01) var ambient_occlusion : float = 0.83
+@export_range(0.0, 1.0, 0.01) var ambient_occlusion : float = 0.99
 ## Light from below as a fraction of the sky light from above, for the density-aware ambient.
 @export_range(0.0, 2.0, 0.01, "or_greater") var ambient_ground_strength : float = 0.92
 ## Scales the extinction the density-aware ambient is occluded by: lower lets it reach further
@@ -141,7 +152,7 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 		atmosphere_changed = true
 
 @export_subgroup("Advanced")
-@export_range(100.0, 100000.0, 1.0, "or_greater", "suffix:km") var planet_radius : float = 6360.0:
+@export_range(1.0, 100000.0, 1.0, "or_greater", "suffix:km") var planet_radius : float = 6360.0:
 	set(value):
 		planet_radius = value
 		atmosphere_changed = true
@@ -278,7 +289,7 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 ## panorama, the skybox, which a SunshineClouds3Driver with a world_environment draws that
 ## environment's sky with (in the editor too): the scene's reflections and ambient light then follow
 ## the atmosphere. Needs atmosphere_enabled.
-@export var skybox_enabled : bool = false
+@export var skybox_enabled : bool = true
 ## Width of the panorama (its height is half of it).
 @export_enum("64:64", "128:128", "256:256", "512:512", "1024:1024") var skybox_resolution : int = 64
 ## The Sky's radiance_size: the resolution Godot filters the reflections and ambient light at.
@@ -645,20 +656,24 @@ func _shader_sources_hash() -> String:
 	return "".join(hashes)
 
 
-## Rebuilds active_layers from layers, and rebakes the profiles whenever a layer's curves change.
+## Rebuilds active_layers from the enabled layers, and again whenever a layer changes (toggled or
+## its curves edited), rebaking the profiles.
 func _sync_layers() -> void:
 	var active : Array[CloudLayer] = []
+	var enabled_count := 0
 	for layer in layers:
-		if layer && active.size() < MAX_LAYERS:
-			active.append(layer)
-	if layers.count(null) + active.size() < layers.size():
-		push_warning("SunshineClouds3: only the first %d layers are drawn." % MAX_LAYERS)
-	for layer in active_layers:
-		if !active.has(layer) && layer.changed.is_connected(_bake_profile):
-			layer.changed.disconnect(_bake_profile)
-	for layer in active:
-		if !layer.changed.is_connected(_bake_profile):
-			layer.changed.connect(_bake_profile)
+		if layer && layer.enabled:
+			enabled_count += 1
+			if active.size() < MAX_LAYERS:
+				active.append(layer)
+	if enabled_count > active.size() && active != active_layers:
+		push_warning("SunshineClouds3: only the first %d enabled layers are drawn." % MAX_LAYERS)
+	for layer in synced_layers:
+		if layer && !layers.has(layer) && layer.changed.is_connected(_sync_layers):
+			layer.changed.disconnect(_sync_layers)
+	for layer in layers:
+		if layer && !layer.changed.is_connected(_sync_layers):
+			layer.changed.connect(_sync_layers)
 	active_layers = active
 	synced_layers = layers.duplicate()
 	_bake_profile()
@@ -1007,7 +1022,7 @@ func set_lights(directional_lights : Array[DirectionalLight3D], directional_sett
 		omni_lights : Array[OmniLight3D], omni_settings : Array[CloudOmniLightSettings], camera_position : Vector3) -> void:
 	var layers_span := _layers_span()
 	var key := [radiance_scale, directional_energy_multiplier, omni_energy_multiplier, cloud_shadow_horizon_fade, light_step_growth,
-		light_march_distance, layers_span]
+		light_march_distance, layers_span, cloud_scale]
 	if omni_lights.size() > MAX_OMNI_LIGHTS:
 		# Which are the nearest moves with the camera.
 		key.append(camera_position)
@@ -1062,12 +1077,12 @@ func set_effectors(effectors : Array[Node3D], effector_settings : Array[CloudEff
 	lights_mutex.unlock()
 
 
-# The lowest floor and highest ceiling of the layers.
+# The lowest floor and highest ceiling of the layers, times cloud_scale.
 func _layers_span() -> Vector2:
 	var span := Vector2(INF, -INF)
 	for layer in active_layers:
 		span = Vector2(minf(span.x, layer.cloud_floor), maxf(span.y, layer.cloud_ceiling))
-	return span
+	return span * cloud_scale
 
 
 func _reaches_layers(position : Vector3, radius : float, layers_span : Vector2) -> bool:
@@ -1075,20 +1090,22 @@ func _reaches_layers(position : Vector3, radius : float, layers_span : Vector2) 
 	return radius > 0.0 && height - radius <= layers_span.y && height + radius >= layers_span.x
 
 
-## The planet's centre: planet_center with spherical_planet, else (0, -planet_radius, 0).
+## The planet's centre: planet_center with spherical_planet, else (0, -planet_radius, 0). Its radius
+## is scaled by cloud_scale with the top of the planet staying put.
 func get_planet_center() -> Vector3:
-	return planet_center if spherical_planet else Vector3(0.0, -planet_radius * 1000.0, 0.0)
+	var center := planet_center if spherical_planet else Vector3(0.0, -planet_radius * 1000.0, 0.0)
+	return center + Vector3.UP * planet_radius * 1000.0 * (1.0 - cloud_scale)
 
 
 ## The height the cloud layers are placed by at position: world Y, or with spherical_planet the
 ## altitude above the planet's surface.
 func get_cloud_height(position : Vector3) -> float:
-	return position.distance_to(planet_center) - planet_radius * 1000.0 if spherical_planet else position.y
+	return position.distance_to(get_planet_center()) - planet_radius * 1000.0 * cloud_scale if spherical_planet else position.y
 
 
 ## Up at position: away from the planet's centre with spherical_planet, else +Y.
 func get_planet_up(position : Vector3) -> Vector3:
-	return (position - planet_center).normalized() if spherical_planet else Vector3.UP
+	return (position - get_planet_center()).normalized() if spherical_planet else Vector3.UP
 
 
 # Encodes the directional lights (at most MAX_DIRECTIONAL_LIGHTS) and picks the shadow caster, and
@@ -1177,7 +1194,7 @@ func _encode_fallback_lights() -> void:
 
 # What the fallback lights are encoded from (checked on the render thread while they're in use).
 func _fallback_key() -> Array:
-	return [radiance_scale, directional_energy_multiplier, light_step_growth, light_march_distance, has_last_directional,
+	return [radiance_scale, directional_energy_multiplier, light_step_growth, light_march_distance, cloud_scale, has_last_directional,
 		last_directional_directions, last_directional_radiance, last_directional_samples, last_sun_direction,
 		fallback_light_elevation, fallback_light_azimuth, fallback_light_color, fallback_light_energy]
 
@@ -1284,14 +1301,15 @@ func _next_point(size : int, nearest : bool) -> int:
 	return next
 
 
-## The first of steps light march steps, growing by light_step_growth to span light_march_distance:
-## first * (growth^n - 1) / (growth - 1) = light_march_distance.
+## The first of steps light march steps, growing by light_step_growth to span light_march_distance
+## (times cloud_scale): first * (growth^n - 1) / (growth - 1) = that distance.
 func _first_light_step(steps : int) -> float:
 	if steps <= 0:
 		return 0.0
+	var distance := light_march_distance * cloud_scale
 	if light_step_growth > 1.0001:
-		return light_march_distance * (light_step_growth - 1.0) / (pow(light_step_growth, steps) - 1.0)
-	return light_march_distance / steps
+		return distance * (light_step_growth - 1.0) / (pow(light_step_growth, steps) - 1.0)
+	return distance / steps
 
 
 ## Bruneton's solar irradiance at ATMOSPHERE_LAMBDAS (they fall on demo.cc's 10 nm bins).
@@ -1311,7 +1329,8 @@ func _solar_irradiance() -> Vector3:
 ## against it straight overhead; 0 once its disc has set.
 func get_light_color(direction : Vector3, position : Vector3) -> Color:
 	var bottom := planet_radius * 1000.0
-	var altitude := get_cloud_height(position) if spherical_planet else position.y - ground_height
+	# Unscaled, as the atmosphere is the same one scaled by cloud_scale.
+	var altitude := (get_cloud_height(position) if spherical_planet else position.y - ground_height) / cloud_scale
 	var r := clampf(bottom + altitude, bottom, bottom + atmosphere_height * 1000.0)
 	var mu := direction.normalized().dot(get_planet_up(position))
 	var transmittance := _transmittance_to_top(r, mu)
@@ -1405,7 +1424,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	if !buffers.has_texture(BUFFERS_CONTEXT, &"raymarch"):
 		for i in VIEW_TEXTURES:
 			buffers.create_texture(BUFFERS_CONTEXT, VIEW_TEXTURE_NAMES[i],
-				RenderingDevice.DATA_FORMAT_R16G16_SFLOAT if i == 3 else RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
+				RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
 				RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT,
 				RenderingDevice.TEXTURE_SAMPLES_1, raymarch_size if i == 2 || i == 3 else size, view_count, 1, true, false)
 		state.prev_view_projections.clear()
@@ -1417,30 +1436,33 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		atmosphere_changed = false
 		atmosphere_precompute_pending = true
 		# Bruneton's AtmosphereParameters for ATMOSPHERE_LAMBDAS, in kilometres, as model.cc builds
-		# them from demo.cc's spectra (the lambdas fall on the 10 nm bins).
+		# them from demo.cc's spectra (the lambdas fall on the 10 nm bins). Lengths are times
+		# cloud_scale and extinctions over it, so the scaled atmosphere looks the same.
 		var solar := _solar_irradiance()
 		var rayleigh := Vector3.ZERO
 		var absorption := Vector3.ZERO
+		var per_km := 1000.0 * atmospheric_density / cloud_scale
 		for i in 3:
 			var lambda : float = ATMOSPHERE_LAMBDAS[i]
 			var bin := int(lambda - 360.0) / 10
-			rayleigh[i] = RAYLEIGH * pow(lambda * 1e-3, -4.0) * 1000.0 * atmospheric_density
-			absorption[i] = (MAX_OZONE_NUMBER_DENSITY * OZONE_CROSS_SECTION[bin] if ozone else 0.0) * 1000.0 * atmospheric_density
+			rayleigh[i] = RAYLEIGH * pow(lambda * 1e-3, -4.0) * per_km
+			absorption[i] = (MAX_OZONE_NUMBER_DENSITY * OZONE_CROSS_SECTION[bin] if ozone else 0.0) * per_km
 		# Angstrom alpha is 0, so aerosols are the same at every wavelength.
-		var mie := mie_angstrom_beta / mie_scale_height * 1000.0 * atmospheric_density
+		var mie := mie_angstrom_beta / mie_scale_height * per_km
 		atmosphere_bytes.fill(0)
 		_encode_vec4(atmosphere_bytes, 0, solar, sun_angular_radius)
 		# mu_s_min: 102 degrees, as the demo uses with half float scattering textures.
-		_encode_vec4(atmosphere_bytes, 16, Vector3(planet_radius, planet_radius + atmosphere_height, mie_phase_g), cos(deg_to_rad(102.0)))
+		_encode_vec4(atmosphere_bytes, 16, Vector3(planet_radius, planet_radius + atmosphere_height, 0.0) * cloud_scale + Vector3(0.0, 0.0, mie_phase_g),
+			cos(deg_to_rad(102.0)))
 		# Density profiles at 32 (Rayleigh), 96 (Mie) and 160 (ozone), two layers of
 		# (width, exp_term, exp_scale, linear_term), (constant_term); single layer profiles get an
 		# empty first layer, as in model.cc.
-		_encode_vec4(atmosphere_bytes, 64, Vector3(0.0, 1.0, -1000.0 / rayleigh_scale_height), 0.0)
-		_encode_vec4(atmosphere_bytes, 128, Vector3(0.0, 1.0, -1000.0 / mie_scale_height), 0.0)
+		_encode_vec4(atmosphere_bytes, 64, Vector3(0.0, 1.0, -1000.0 / (rayleigh_scale_height * cloud_scale)), 0.0)
+		_encode_vec4(atmosphere_bytes, 128, Vector3(0.0, 1.0, -1000.0 / (mie_scale_height * cloud_scale)), 0.0)
 		# Ozone: rises linearly from 0 at 10 km to 1 at 25 km, falls back to 0 at 40 km.
-		_encode_vec4(atmosphere_bytes, 160, Vector3(25.0, 0.0, 0.0), 1000.0 / 15000.0)
+		_encode_vec4(atmosphere_bytes, 160, Vector3(25.0 * cloud_scale, 0.0, 0.0), 1000.0 / (15000.0 * cloud_scale))
 		_encode_vec4(atmosphere_bytes, 176, Vector3(-2.0 / 3.0, 0.0, 0.0), 0.0)
-		_encode_vec4(atmosphere_bytes, 192, Vector3(0.0, 0.0, 0.0), -1000.0 / 15000.0)
+		_encode_vec4(atmosphere_bytes, 192, Vector3(0.0, 0.0, 0.0), -1000.0 / (15000.0 * cloud_scale))
 		_encode_vec4(atmosphere_bytes, 208, Vector3(8.0 / 3.0, 0.0, 0.0), 0.0)
 		_encode_vec4(atmosphere_bytes, 224, rayleigh, 0.0)
 		_encode_vec4(atmosphere_bytes, 240, Vector3.ONE * mie * mie_single_scattering_albedo, 0.0)
@@ -1505,36 +1527,38 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		_retire(delta_mie)
 		_retire(delta_scattering_density)
 
-	# The layers once a frame: their wind delta is since the last frame.
+	# The layers once a frame: their wind delta is since the last frame. Their sizes are times
+	# cloud_scale and their extinction over it; the noise offsets are world positions already (the
+	# driver scales the wind).
 	if first_viewport:
 		for i in layer_count:
 			var layer := frame_layers[i]
 			var offset := i * LAYER_BYTES
-			var half_tile := layer.noise_scale * 0.5
+			var half_tile := layer.noise_scale * cloud_scale * 0.5
 			var wind_delta := layer.noise_offset - layer.prev_noise_offset
 			wind_delta = Vector3(wrapf(wind_delta.x, -half_tile, half_tile), wrapf(wind_delta.y, -half_tile, half_tile),
 				wrapf(wind_delta.z, -half_tile, half_tile))
 			layer.prev_noise_offset = layer.noise_offset
-			_encode_vec4(layers_bytes, offset, layer.noise_offset, layer.noise_scale)
-			_encode_vec4(layers_bytes, offset + 16, layer.detail_noise_offset, layer.detail_noise_scale)
-			_encode_vec4(layers_bytes, offset + 32, layer.curl_noise_offset, layer.curl_noise_scale)
-			_encode_vec4(layers_bytes, offset + 48, wind_delta, layer.cloud_floor)
+			_encode_vec4(layers_bytes, offset, layer.noise_offset, layer.noise_scale * cloud_scale)
+			_encode_vec4(layers_bytes, offset + 16, layer.detail_noise_offset, layer.detail_noise_scale * cloud_scale)
+			_encode_vec4(layers_bytes, offset + 32, layer.curl_noise_offset, layer.curl_noise_scale * cloud_scale)
+			_encode_vec4(layers_bytes, offset + 48, wind_delta, layer.cloud_floor * cloud_scale)
 			layers_bytes.encode_float(offset + 64, layer.coverage_noise_offset.x)
 			layers_bytes.encode_float(offset + 68, layer.coverage_noise_offset.z)
-			layers_bytes.encode_float(offset + 72, layer.coverage_noise_scale)
+			layers_bytes.encode_float(offset + 72, layer.coverage_noise_scale * cloud_scale)
 			layers_bytes.encode_float(offset + 76, layer.coverage_noise_strength)
-			layers_bytes.encode_float(offset + 80, layer.cloud_ceiling)
+			layers_bytes.encode_float(offset + 80, layer.cloud_ceiling * cloud_scale)
 			layers_bytes.encode_float(offset + 84, layer.cloud_coverage * coverage)
 			layers_bytes.encode_float(offset + 88, layer.detail_strength)
 			layers_bytes.encode_float(offset + 92, layer.detail_power)
-			layers_bytes.encode_float(offset + 96, layer.curl_strength)
-			layers_bytes.encode_float(offset + 100, layer.density * density)
+			layers_bytes.encode_float(offset + 96, layer.curl_strength * cloud_scale)
+			layers_bytes.encode_float(offset + 100, layer.density * density / cloud_scale)
 		if layer_count > 0:
 			rd.buffer_update(layers_buffer, 0, layer_count * LAYER_BYTES, layers_bytes)
 		var background_basis := Basis.from_euler(background_rotation * (PI / 180.0)).inverse()
 		var sky_key_now := [has_background, background_color, background_energy, background_fade_brightness, background_basis,
 			background_skybox_energy, skybox_ground_color, background_rid, radiance_scale, ground_height, skybox_energy, skybox_cloud_dimming, coverage,
-			density, skybox_clouds, skybox_cloud_steps, skybox_cloud_light_steps, skybox_cloud_distance, atmosphere_tint, cloud_tint]
+			density, skybox_clouds, skybox_cloud_steps, skybox_cloud_light_steps, skybox_cloud_distance, atmosphere_tint, cloud_tint, cloud_scale]
 		if sky_key_now != sky_settings_key:
 			sky_settings_key = sky_key_now
 			# The skybox shows the new settings at once.
@@ -1545,7 +1569,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			var ground := skybox_ground_color.srgb_to_linear()
 			_encode_vec4(sky_bytes, 80, Vector3(ground.r, ground.g, ground.b), background_skybox_energy)
 			sky_bytes.encode_float(96, skybox_energy * maxf(1.0 - skybox_cloud_dimming * (coverage + density) * 0.5, 0.0))
-			sky_bytes.encode_float(100, skybox_cloud_distance)
+			sky_bytes.encode_float(100, skybox_cloud_distance * cloud_scale)
 			sky_bytes.encode_s32(104, skybox_cloud_steps if skybox_clouds else 0)
 			sky_bytes.encode_s32(108, skybox_cloud_light_steps)
 			var atmosphere_linear := atmosphere_tint.srgb_to_linear()
@@ -1662,29 +1686,30 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		params_bytes.encode_float(256, primary_phase_g)
 		params_bytes.encode_float(260, current_frame_weight)
 		params_bytes.encode_s32(264, raymarch_resolution)
-		params_bytes.encode_float(268, cloud_step_size)
+		params_bytes.encode_float(268, cloud_step_size * cloud_scale)
 		params_bytes.encode_float(272, secondary_phase_g)
 		params_bytes.encode_float(276, multiple_scattering_depth_power)
 		params_bytes.encode_float(280, multiple_scattering_height_power)
-		params_bytes.encode_float(284, near_step_size)
-		params_bytes.encode_float(288, far_step_size_offset)
-		params_bytes.encode_float(292, step_adjustment_distance)
+		params_bytes.encode_float(284, near_step_size * cloud_scale)
+		params_bytes.encode_float(288, far_step_size_offset * cloud_scale)
+		params_bytes.encode_float(292, step_adjustment_distance * cloud_scale)
 		params_bytes.encode_s32(296, max_steps)
-		params_bytes.encode_float(304, light_march_distance)
+		params_bytes.encode_float(304, light_march_distance * cloud_scale)
 		params_bytes.encode_float(308, light_step_growth)
-		params_bytes.encode_float(316, max_distance)
+		params_bytes.encode_float(316, max_distance * cloud_scale)
 		params_bytes.encode_float(320, radiance_scale)
 		params_bytes.encode_float(324, ground_height)
-		params_bytes.encode_float(328, planet_radius)
+		params_bytes.encode_float(328, planet_radius * cloud_scale)
 		params_bytes.encode_float(332, noise_stats.x)
 		params_bytes.encode_float(336, noise_stats.y)
 		params_bytes.encode_s32(340, curl_iterations)
 		params_bytes.encode_s32(344, cloud_exit_steps)
 		params_bytes.encode_s32(348, interlace)
-		params_bytes.encode_float(352, wind_reprojection_distance)
+		params_bytes.encode_float(352, wind_reprojection_distance * cloud_scale)
 		params_bytes.encode_float(356, ambient_occlusion)
 		params_bytes.encode_float(360, ambient_ground_strength)
 		params_bytes.encode_float(364, ambient_extinction_scale)
+		_encode_vec4(params_bytes, 368, Vector3(ground_color.r, ground_color.g, ground_color.b), 0.0)
 		rd.buffer_update(params_buffer, 0, PARAMS_BYTES, params_bytes)
 
 		var color_layer := buffers.get_color_layer(view)
@@ -1733,7 +1758,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			# The shadow map, and the Shadow buffer the resolve's screen space shadows read: once a
 			# frame, and again, straight into shadow_texture, for a viewport whose camera is away
 			# from the one it's centred on.
-			var far_camera := !first_viewport && cam_transform.origin.distance_to(shadow_camera) > cloud_shadow_extent * 0.01
+			var shadow_extent := maxf(cloud_shadow_extent * cloud_scale, 1.0)
+			var far_camera := !first_viewport && cam_transform.origin.distance_to(shadow_camera) > shadow_extent * 0.01
 			if first_viewport || far_camera:
 				shadow_camera = cam_transform.origin
 				var keyed := shadow_keys[0].is_valid() && !far_camera
@@ -1782,7 +1808,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					var render := shadows_active
 					if keyed:
 						var reset := shadow_keys_ready == 0 \
-							|| cam_transform.origin.distance_to(shadow_key_camera) > cloud_shadow_extent * 0.25 \
+							|| cam_transform.origin.distance_to(shadow_key_camera) > shadow_extent * 0.25 \
 							|| to_sun.dot(shadow_key_sun) < 0.9998
 						render = shadows_active && !shadow_fading && (reset || shadow_age >= cloud_shadow_update_interval)
 						if render:
@@ -1798,10 +1824,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						var march_floor := INF
 						var march_ceiling := -INF
 						for layer in frame_layers:
-							march_floor = minf(march_floor, layer.cloud_floor)
-							march_ceiling = maxf(march_ceiling, layer.cloud_ceiling)
+							march_floor = minf(march_floor, layer.cloud_floor * cloud_scale)
+							march_ceiling = maxf(march_ceiling, layer.cloud_ceiling * cloud_scale)
 						var thickness := maxf(march_ceiling - march_floor, 1.0) if shadows_active else 1.0
-						var extent := maxf(cloud_shadow_extent, 1.0)
+						var extent := shadow_extent
 						_encode_mat4(shadow_bytes, 0, Projection(light_to_world))
 						_encode_mat4(shadow_bytes, 64, Projection(world_to_light))
 						shadow_bytes.encode_float(128, extent)
@@ -2055,14 +2081,14 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 	# With spherical_planet, the horizon also tilts as the camera moves around the planet.
 	var camera_height := get_cloud_height(camera_position)
 	var camera_up := get_planet_up(camera_position)
-	var reset := skybox_keys_ready == 0 || absf(camera_height - skybox_key_camera_height) > 200.0 \
-		|| sun_direction.dot(skybox_key_sun) < 0.9998 || camera_up.dot(skybox_key_up) < 0.9998 # 200.0: camera height change (m) since the last render that re-renders the skybox at once. 100-500: lower snaps sooner on big climbs, higher leans on the interval updates.
+	var reset := skybox_keys_ready == 0 || absf(camera_height - skybox_key_camera_height) > 200.0 * cloud_scale \
+		|| sun_direction.dot(skybox_key_sun) < 0.9998 || camera_up.dot(skybox_key_up) < 0.9998 # 200.0: camera height change (m, times cloud_scale) since the last render that re-renders the skybox at once. 100-500: lower snaps sooner on big climbs, higher leans on the interval updates.
 	# Nothing it depends on changed since the last render: it stays as it is (so the editor, which
 	# only redraws on changes, can go idle).
 	var clouds_state := layers_bytes.slice(0, layer_count * LAYER_BYTES) if skybox_clouds else PackedByteArray()
-	var changed := absf(camera_height - skybox_key_camera_height) > 1.0 || !sun_direction.is_equal_approx(skybox_key_sun) \
+	var changed := absf(camera_height - skybox_key_camera_height) > 1.0 * cloud_scale || !sun_direction.is_equal_approx(skybox_key_sun) \
 		|| !camera_up.is_equal_approx(skybox_key_up) \
-		|| clouds_state != skybox_key_clouds || lights_version != skybox_key_lights # 1.0: camera height change (m) below which an otherwise unchanged skybox idles. 0.5-5: lower re-renders on tiny bobs, higher lets the horizon drift.
+		|| clouds_state != skybox_key_clouds || lights_version != skybox_key_lights # 1.0: camera height change (m, times cloud_scale) below which an otherwise unchanged skybox idles. 0.5-5: lower re-renders on tiny bobs, higher lets the horizon drift.
 	var groups := Vector2i(ceili(size.x / 8.0), ceili(size.y / 8.0))
 	if reset || (changed && (!use_keys || skybox_age >= skybox_update_interval)):
 		if use_keys:

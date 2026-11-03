@@ -302,20 +302,22 @@ func _process(delta : float) -> void:
 
 	# Wind, as SunshineClouds2's driver: direction and scale ease towards their targets, and every
 	# layer moves each of its noises at its own speed (the detail also rises), kept within a tile
-	# of their noise relative to the origin offset.
+	# of their noise relative to the origin offset. Speeds and tiles are times the clouds' cloud_scale.
 	wind_direction_cur = wind_direction_cur.move_toward(wind_direction, delta * transition_speed)
 	wind_scale_cur = move_toward(wind_scale_cur, clampf(wind_scale * 0.05, 0.0, 1.0), delta * transition_speed)
 	var wind_speed := 0.0 if (!iterate_wind_in_editor && Engine.is_editor_hint()) || (!iterate_wind_in_game && !Engine.is_editor_hint()) else wind_scale_cur
-	var wind := wind_direction_cur * delta * wind_speed
+	var scale := clouds_resource.cloud_scale
+	var wind := wind_direction_cur * delta * wind_speed * scale
 	for layer in clouds_resource.layers:
 		if layer == null:
 			continue
 		layer.coverage_noise_offset = origin_offset + _wrap(layer.coverage_noise_offset - prev_origin_offset + wind * layer.coverage_wind_speed,
-			layer.coverage_noise_scale)
-		layer.noise_offset = origin_offset + _wrap(layer.noise_offset - prev_origin_offset + wind * layer.base_wind_speed, layer.noise_scale)
+			layer.coverage_noise_scale * scale)
+		layer.noise_offset = origin_offset + _wrap(layer.noise_offset - prev_origin_offset + wind * layer.base_wind_speed, layer.noise_scale * scale)
 		layer.detail_noise_offset = origin_offset + _wrap(layer.detail_noise_offset - prev_origin_offset
-			+ (wind * layer.detail_wind_speed + Vector3.UP * absf(layer.detail_wind_speed) * delta * wind_speed), layer.detail_noise_scale)
-		layer.curl_noise_offset = origin_offset + _wrap(layer.curl_noise_offset - prev_origin_offset + wind * layer.curl_wind_speed, layer.curl_noise_scale)
+			+ (wind * layer.detail_wind_speed + Vector3.UP * absf(layer.detail_wind_speed) * delta * wind_speed * scale), layer.detail_noise_scale * scale)
+		layer.curl_noise_offset = origin_offset + _wrap(layer.curl_noise_offset - prev_origin_offset + wind * layer.curl_wind_speed,
+			layer.curl_noise_scale * scale)
 	prev_origin_offset = origin_offset
 
 
@@ -370,7 +372,7 @@ func _update_shadow_projector() -> void:
 		# Loaded here, not preloaded: texture_blit shaders only compile on engines with drawable textures.
 		_shadow_blit_material.shader = load("res://addons/SunshineClouds3/Resources/Shaders/SunshineClouds3ShadowBlit.gdshader")
 
-	var extent := Vector2(clouds_resource.cloud_shadow_extent, clouds_resource.cloud_shadow_extent)
+	var extent := Vector2.ONE * maxf(clouds_resource.cloud_shadow_extent * clouds_resource.cloud_scale, 1.0)
 	if light.get(&"light_projector") != _shadow_projector:
 		light.set(&"light_projector", _shadow_projector)
 	if light.get(&"light_projector_size") != extent:

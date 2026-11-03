@@ -100,9 +100,14 @@ float sample_layer_density(vec3 p, float height, int index, bool apply_curl, flo
 	vec2 profile_uv = vec2((height_fraction * (profile_size.x - 1.0) + 0.5) / profile_size.x, (float(index) + 0.5) / profile_size.y);
 	vec4 profile = textureLod(profile_texture, profile_uv, 0.0);
 	// cloud_coverage pushes the coverage noise: 1 = full, 0.5 = the noise as is, 0 = none.
-	float coverage_noise = textureLod(coverage_texture, (p.xz - layer.coverage_noise_offset) / layer.coverage_noise_scale, 0.0).r;
-	coverage = clamp(mix(layer.cloud_coverage, clamp(coverage_noise + 2.0 * layer.cloud_coverage - 1.0, 0.0, 1.0), layer.coverage_noise_strength)
-			+ added_coverage, 0.0, 1.0);
+	// coverage_noise_strength fills its gaps towards a uniform cloud_coverage, so at 1 the noise
+	// isn't sampled.
+	coverage = layer.cloud_coverage;
+	if (layer.coverage_noise_strength != 1.0) {
+		float coverage_noise = textureLod(coverage_texture, (p.xz - layer.coverage_noise_offset) / layer.coverage_noise_scale, 0.0).r;
+		coverage = mix(clamp(coverage_noise + 2.0 * layer.cloud_coverage - 1.0, 0.0, 1.0), layer.cloud_coverage, layer.coverage_noise_strength);
+	}
+	coverage = clamp(coverage + added_coverage, 0.0, 1.0);
 	dimensional_profile = profile.r * coverage;
 	if (dimensional_profile <= 0.0) {
 		return 0.0;
@@ -117,17 +122,25 @@ float sample_layer_density(vec3 p, float height, int index, bool apply_curl, flo
 	float cloud_noise_composite = textureLod(noise_texture, (p - layer.noise_offset) / layer.noise_scale, 0.0).r;
 	float threshold = 1.0 - dimensional_profile;
 	// Detail noise: the composite at the detail scale, centred on its mean and scaled by its
-	// deviation, applied before the cut so it reshapes the surface, faded into the core by
-	// pow(detail_power, shape).
+	// deviation, applied before the cut so it reshapes the surface. detail_power masks it by the
+	// primary noise: shape is 0 at the base surface and 1 in the puffs' cores, so at 1 the detail
+	// keeps to the soft, low noise spans between puffs, at 0 it's everywhere. The mask is at most
+	// 1, so detail_reach still bounds it.
 	float detail_strength = layer.detail_strength * profile.g;
 	float detail_reach = detail_strength * (1.0 - params.noise_mean) / params.noise_deviation * dimensional_profile;
 	if (cloud_noise_composite + detail_reach <= threshold) {
 		return 0.0;
 	}
 	float shape = clamp((cloud_noise_composite - threshold) / dimensional_profile, 0.0, 1.0);
-	float detail = textureLod(noise_texture, (p - layer.detail_noise_offset) / layer.detail_noise_scale, 0.0).r - params.noise_mean;
-	detail *= detail_strength / params.noise_deviation * dimensional_profile * pow(layer.detail_power, shape);
-	return clamp(cloud_noise_composite + detail - threshold, 0.0, 1.0);
+	float soft = 1.0 - shape;
+	// Not sampled where it's scaled to nothing: no detail strength (the layer's or its curve's at
+	// this height), or masked out by detail_power.
+	float detail_amount = detail_strength / params.noise_deviation * dimensional_profile * mix(1.0, soft * soft, layer.detail_power);
+	if (detail_amount != 0.0) {
+		cloud_noise_composite += (textureLod(noise_texture, (p - layer.detail_noise_offset) / layer.detail_noise_scale, 0.0).r - params.noise_mean)
+				* detail_amount;
+	}
+	return clamp(cloud_noise_composite - threshold, 0.0, 1.0);
 }
 
 // Extinction (per metre) at p, summed over the layers containing it, with their dimensional
@@ -257,11 +270,12 @@ float light_transmittance(vec3 p, vec3 direction, float max_distance, float laye
 	return exp(-optical_depth);
 }
 
-// Ambient at a cloud sample, as a fraction of the sky's. Density-aware (Hillaire 2016): isotropic
-// light from the sky above and the ground below, each through the cloud between the sample and the
-// top or bottom of the layers holding it at the sample's own extinction.
-float cloud_ambient(vec3 p, float extinction, float dimensional_profile) {
-	float ambient_scattering = pow(1.0 - dimensional_profile, 0.5);
+// Ambient at a cloud sample, as a fraction of the sky's: x = from the sky (ambient_color), y = from
+// the ground (ground_color). Density-aware (Hillaire 2016): isotropic light from the sky above and
+// the ground below, each through the cloud between the sample and the top or bottom of the layers
+// holding it at the sample's own extinction. The profile ambient is all sky.
+vec2 cloud_ambient(vec3 p, float extinction, float dimensional_profile) {
+	vec2 ambient_scattering = vec2(pow(1.0 - dimensional_profile, 0.5), 0.0);
 	if (params.ambient_occlusion > 0.0) {
 		float height = planet_height(p);
 		float top = -1e30;
@@ -273,8 +287,8 @@ float cloud_ambient(vec3 p, float extinction, float dimensional_profile) {
 			}
 		}
 		float scaled = extinction * params.ambient_extinction_scale;
-		float density_ambient = hemisphere_transmittance(scaled * max(top - height, 0.0))
-				+ params.ambient_ground_strength * hemisphere_transmittance(scaled * max(height - bottom, 0.0));
+		vec2 density_ambient = vec2(hemisphere_transmittance(scaled * max(top - height, 0.0)),
+				params.ambient_ground_strength * hemisphere_transmittance(scaled * max(height - bottom, 0.0)));
 		ambient_scattering = mix(ambient_scattering, density_ambient, params.ambient_occlusion);
 	}
 	return ambient_scattering;
@@ -290,10 +304,11 @@ layout(constant_id = 1) const uint INTERLACE_PASS_U = 0u;
 // x = light absorption (texels interlacing doesn't trace hold the reprojected history, with
 // -absorption - 1), yzw = direct light.
 layout(rgba16f, set = 0, binding = 8) uniform restrict writeonly image2D current_image;
-// x = ambient intensity, y = absorption weighted cloud distance (km).
-layout(rg16f, set = 0, binding = 27) uniform restrict writeonly image2D current_b_image;
-// The previous frame's resolve output: as above, and r = scene distance (km), g = ambient
-// intensity, b = weighted cloud distance.
+// x = sky ambient intensity, y = absorption weighted cloud distance (km), z = ground ambient
+// intensity.
+layout(rgba16f, set = 0, binding = 27) uniform restrict writeonly image2D current_b_image;
+// The previous frame's resolve output: as above, and r = scene distance (km), g = sky ambient
+// intensity, b = weighted cloud distance, a = ground ambient intensity.
 layout(set = 0, binding = 16) uniform sampler2D history_texture;
 layout(set = 0, binding = 17) uniform sampler2D history_b_texture;
 
@@ -332,7 +347,7 @@ void main() {
 	if (INTERLACE_PASS == 2) {
 		// The history at this pixel's cloud, its distance refined once at the reprojected position.
 		// Traced after all when that lands off screen, when opaque scene is now in front of the
-		// cloud, or when the scene was nearer there last frame.
+		// cloud, or when the scene was nearer there last frame (unless the cloud hid it).
 		vec2 prev_uv = (vec2(pixel) + 0.5) / vec2(params.screen_size);
 		vec4 history = textureLod(history_texture, prev_uv, 0.0);
 		vec4 history_b = textureLod(history_b_texture, prev_uv, 0.0);
@@ -344,14 +359,15 @@ void main() {
 			prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
 			found = prev_clip.w > 0.0 && !any(lessThan(prev_uv, vec2(0.0))) && !any(greaterThan(prev_uv, vec2(1.0)));
 			if (found) {
-				history = sample_history(history_texture, history_b_texture, prev_uv, max_distance, history_b, found);
+				history = sample_history(history_texture, history_b_texture, prev_uv, max_distance, history_b, found, -1.0);
 			}
 		}
 		ivec2 prev_pixel = min(ivec2(prev_uv * vec2(params.screen_size)), ivec2(params.screen_size) - 1);
+		float prev_distance = texelFetch(history_b_texture, prev_pixel, 0).r * 1000.0;
 		if (found && max_distance >= cloud_distance(history.x, history_b.b) * 0.95
-				&& texelFetch(history_b_texture, prev_pixel, 0).r * 1000.0 >= max_distance * 0.95) {
+				&& (prev_distance >= max_distance * 0.95 || opaque_before(history.x, cloud_distance(history.x, history_b.b), prev_distance))) {
 			imageStore(current_image, texel, vec4(-history.x - 1.0, history.yzw));
-			imageStore(current_b_image, texel, vec4(history_b.gb, 0.0, 0.0));
+			imageStore(current_b_image, texel, vec4(history_b.gba, 0.0));
 			return;
 		}
 	}
@@ -400,7 +416,7 @@ void main() {
 
 	float light_absorption = 0.0;
 	vec3 direct_light = vec3(0.0);
-	float amb_intensity = 0.0;
+	vec2 amb_intensity = vec2(0.0);
 	float weighted_distance = 0.0;
 	float light_jitter = jitter.y;
 	// Marching at cloud_step_size since a sample found cloud, and the empty samples since.
@@ -497,7 +513,7 @@ void main() {
 					+ ms_volume * henyey_greenstein(cos_angle, params.secondary_phase_g)) * radiance.rgb * falloff;
 		}
 
-		float ambient_scattering = cloud_ambient(p, extinction, dimensional_profile);
+		vec2 ambient_scattering = cloud_ambient(p, extinction, dimensional_profile);
 
 		// This step's share of the pixel: its opacity times the transmittance in front of it.
 		float step_weight = (1.0 - exp(-extinction * step_size)) * (1.0 - light_absorption);
@@ -511,7 +527,7 @@ void main() {
 		}
 	}
 	imageStore(current_image, texel, vec4(light_absorption, direct_light));
-	imageStore(current_b_image, texel, vec4(amb_intensity, weighted_distance * 0.001, 0.0, 0.0));
+	imageStore(current_b_image, texel, vec4(amb_intensity.x, weighted_distance * 0.001, amb_intensity.y, 0.0));
 }
 #endif
 
@@ -671,7 +687,7 @@ float skybox_clouds(vec3 ray_origin, vec3 direction, float jitter, out vec3 clou
 
 	float light_absorption = 0.0;
 	vec3 direct_light = vec3(0.0);
-	float amb_intensity = 0.0;
+	vec2 amb_intensity = vec2(0.0);
 	float weighted_distance = 0.0;
 	for (int i = 0; i < steps; i++) {
 		float sample_t = t + (float(i) + jitter) * step_size;
@@ -716,7 +732,7 @@ float skybox_clouds(vec3 ray_origin, vec3 direction, float jitter, out vec3 clou
 	float r = length(point);
 	vec3 sky_light = GetIrradiance(ATMOSPHERE, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale
 			* sky_settings.atmosphere_tint;
-	cloud_light = (direct_light + amb_intensity * sky_light * params.ambient_color * params.ambient_energy) * sky_settings.cloud_tint;
+	cloud_light = (direct_light + (amb_intensity.x * params.ambient_color + amb_intensity.y * params.ground_color) * sky_light * params.ambient_energy) * sky_settings.cloud_tint;
 	return light_absorption;
 }
 

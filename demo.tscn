@@ -12,6 +12,7 @@
 [ext_resource type="Script" uid="uid://c7hwen2bl73wi" path="res://addons/SunshineClouds3/SunshineClouds3.gd" id="10_hu8bq"]
 [ext_resource type="Script" uid="uid://ciwtkox7cf2er" path="res://addons/SunshineClouds3/SunshineClouds3Driver.gd" id="11_l07pr"]
 [ext_resource type="Script" uid="uid://cg2nybl8tbgrp" path="res://addons/SunshineClouds3/Resources/CloudDirectionalLightSettings.gd" id="12_vtas4"]
+[ext_resource type="Script" uid="uid://djgbllsd1m6ar" path="res://addons/SunshineClouds3/Resources/CloudEffectorSettings.gd" id="13_36gju"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_bej8n"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -24,17 +25,18 @@ sky_material = SubResource("ProceduralSkyMaterial_bej8n")
 background_mode = 2
 sky = SubResource("Sky_npcgs")
 glow_enabled = true
+fog_density = 0.001
 
 [sub_resource type="Curve" id="Curve_svejp"]
 _data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(0.07081545, 0), -0.45368385, 0.062191937, 0, 0]
 point_count = 2
 
 [sub_resource type="Curve" id="Curve_36gju"]
-_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.46296299), 0.0, 0.0, 0, 0]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(1, 0), -2.4269671, 0.0, 0, 0]
 point_count = 2
 
 [sub_resource type="Curve" id="Curve_tql22"]
-_data = [Vector2(0, 0.01569), 16.71, 16.71, 0, 0, Vector2(0.043551087, 0.9561754), -2.5508158, -2.5508158, 0, 0, Vector2(0.12562814, 0.66135466), -1.8260871, -1.8260871, 0, 0, Vector2(0.37339056, 0.45549738), 0.0, 0.0, 0, 0, Vector2(0.884375, 0.27642274), -0.24628581, -0.24628581, 0, 0, Vector2(1, 0.003922), -2.739, -2.739, 0, 0]
+_data = [Vector2(0, 0.01569), 16.71, 16.71, 0, 0, Vector2(0.06944444, 0.9550562), 0.24576867, 0.24576867, 0, 0, Vector2(0.12562814, 0.66135466), -1.8260871, -1.8260871, 0, 0, Vector2(0.37339056, 0.45549738), 0.0, 0.0, 0, 0, Vector2(0.884375, 0.27642274), -0.24628581, -0.24628581, 0, 0, Vector2(1, 0.003922), -2.739, -2.739, 0, 0]
 point_count = 6
 
 [sub_resource type="Resource" id="Resource_jbdfk"]
@@ -54,8 +56,6 @@ needs_motion_vectors = false
 needs_normal_roughness = false
 script = ExtResource("10_hu8bq")
 layers = Array[ExtResource("8_y4qkf")]([SubResource("Resource_jbdfk")])
-coverage = 0.604
-skybox_enabled = true
 has_last_directional = true
 last_directional_directions = PackedVector3Array(0.7117084, 0.5371706, -0.4526798)
 last_directional_radiance = PackedVector3Array(1, 1, 1)
@@ -67,6 +67,9 @@ compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4gl1
 
 [sub_resource type="Resource" id="Resource_i1g04"]
 script = ExtResource("12_vtas4")
+
+[sub_resource type="Resource" id="Resource_tql22"]
+script = ExtResource("13_36gju")
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_svejp"]
 top_radius = 100.0
@@ -93,6 +96,8 @@ iterate_wind_in_editor = true
 iterate_wind_in_game = true
 directional_lights = Array[NodePath]([NodePath("../DirectionalLight3D")])
 directional_light_settings = Array[ExtResource("12_vtas4")]([SubResource("Resource_i1g04")])
+effectors = Array[NodePath]([NodePath("")])
+effector_settings = Array[ExtResource("13_36gju")]([SubResource("Resource_tql22")])
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=1074679493]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2500, 0)

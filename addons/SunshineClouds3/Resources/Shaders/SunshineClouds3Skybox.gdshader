@@ -1,4 +1,6 @@
 shader_type sky;
+// The fog makes the entire skybox permanently the fog color otherwise.
+render_mode disable_fog;
 
 // SunshineClouds3's skybox panorama, laid out as SKY_COORDS.
 uniform sampler2D skybox : filter_linear, repeat_enable, hint_default_black;
