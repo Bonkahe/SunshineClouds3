@@ -7,11 +7,12 @@ class_name SunshineClouds3
 ##	https://ebruneton.github.io/precomputed_atmospheric_scattering/ (provided the atmospheric calculation pretty much 1-1, super cool stuff)
 ##
 
-## Versions raymarch, shadow_map, shadow_blend, skybox, skybox_blend and sample_points.
+
 const SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3Raymarch.glsl"
 const RESOLVE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3Resolve.glsl"
 const ATMOSPHERE_PRECOMPUTE_PATH := "res://addons/SunshineClouds3/Compute/atmosphere/AtmospherePrecompute.glsl"
-const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMPUTE_PATH]
+const MSAA_COMPOSITE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3MsaaComposite.glsl"
+const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMPUTE_PATH, MSAA_COMPOSITE_SHADER_PATH]
 
 ## I wouldn't change this, as 32 sample points per frame should be enough, and it buffers so if you go over that one frame and under it the other the ones missed will roll over.
 const MAX_SAMPLE_POINTS := 32
@@ -371,6 +372,12 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 var rd : RenderingDevice
 var shader : RID
 var resolve_shader : RID
+## The versions used with 3D MSAA.
+var raymarch_msaa_shader : RID
+var resolve_msaa_shader : RID
+var msaa_composite_shader : RID
+## The MSAA composite's render pipelines (multiply, add) by framebuffer format.
+var msaa_composite_pipelines := {}
 var shadow_shader : RID
 var shadow_blend_shader : RID
 var shadow_blend_pipeline : RID
@@ -592,6 +599,7 @@ func _notification(what : int) -> void:
 		return
 	# Pipelines and uniform sets go with the shaders and resources they use.
 	var rids : Array[RID] = [shader, resolve_shader, shadow_shader, shadow_blend_shader, skybox_shader, skybox_blend_shader, sample_shader,
+		raymarch_msaa_shader, resolve_msaa_shader, msaa_composite_shader,
 		nearest_sampler, noise_sampler, lut_sampler, background_sampler,
 		params_buffer, layers_buffer, shadow_buffer, sky_buffer, atmosphere_buffer, point_sample_data_buffer, lights_buffer,
 		transmittance_texture, scattering_texture, irradiance_texture, shadow_texture, shadow_keys[0], shadow_keys[1],
@@ -886,9 +894,10 @@ func _initialize() -> void:
 ## them). Returns false, keeping the old shaders, if one that draws doesn't compile; without the
 ## sample shader samples just stay queued.
 func _create_shaders() -> bool:
-	var new_shaders : Array[RID] = [_load_shader(SHADER_PATH, &"raymarch"), _load_shader(RESOLVE_SHADER_PATH),
+	var new_shaders : Array[RID] = [_load_shader(SHADER_PATH, &"raymarch"), _load_shader(RESOLVE_SHADER_PATH, &"resolve"),
 		_load_shader(SHADER_PATH, &"shadow_map"), _load_shader(SHADER_PATH, &"shadow_blend"),
-		_load_shader(SHADER_PATH, &"skybox"), _load_shader(SHADER_PATH, &"skybox_blend")]
+		_load_shader(SHADER_PATH, &"skybox"), _load_shader(SHADER_PATH, &"skybox_blend"),
+		_load_shader(SHADER_PATH, &"raymarch_msaa"), _load_shader(RESOLVE_SHADER_PATH, &"msaa"), _load_shader(MSAA_COMPOSITE_SHADER_PATH)]
 	for version : String in PRECOMPUTE_VERSIONS:
 		new_shaders.append(_load_shader(ATMOSPHERE_PRECOMPUTE_PATH, version))
 	if new_shaders.has(RID()):
@@ -897,7 +906,8 @@ func _create_shaders() -> bool:
 				rd.free_rid(s)
 		return false
 	var new_sample_shader := _load_shader(SHADER_PATH, &"sample_points")
-	for s : RID in [shader, resolve_shader, shadow_shader, shadow_blend_shader, skybox_shader, skybox_blend_shader, sample_shader] + precompute_shaders:
+	for s : RID in [shader, resolve_shader, shadow_shader, shadow_blend_shader, skybox_shader, skybox_blend_shader, sample_shader,
+			raymarch_msaa_shader, resolve_msaa_shader, msaa_composite_shader] + precompute_shaders:
 		if s.is_valid():
 			rd.free_rid(s)
 	shader = new_shaders[0]
@@ -908,13 +918,17 @@ func _create_shaders() -> bool:
 	skybox_shader = new_shaders[4]
 	skybox_blend_shader = new_shaders[5]
 	skybox_blend_pipeline = rd.compute_pipeline_create(skybox_blend_shader)
-	precompute_shaders = new_shaders.slice(6)
+	raymarch_msaa_shader = new_shaders[6]
+	resolve_msaa_shader = new_shaders[7]
+	msaa_composite_shader = new_shaders[8]
+	msaa_composite_pipelines.clear()
+	precompute_shaders = new_shaders.slice(9)
 	sample_shader = new_sample_shader
 
 	for pipelines : Array[RID] in [raymarch_pipelines, resolve_pipelines, shadow_pipelines, skybox_pipelines, sample_pipelines, precompute_pipelines]:
 		pipelines.clear()
-	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3)
-	resolve_pipelines.resize(2)
+	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3 * 2) # Per layer count and interlace pass, without and with MSAA.
+	resolve_pipelines.resize(4) # Atmosphere off/on, without and with MSAA.
 	shadow_pipelines.resize(MAX_LAYERS + 1)
 	skybox_pipelines.resize(MAX_LAYERS + 1)
 	sample_pipelines.resize(MAX_LAYERS + 1)
@@ -928,8 +942,9 @@ func _load_shader(path : String, version : StringName = &"") -> RID:
 		push_error("Could not load %s." % path)
 		return RID()
 	var spirv := shader_file.get_spirv(version)
-	if !spirv.compile_error_compute.is_empty():
-		push_error("%s %s: %s" % [path.get_file(), version, spirv.compile_error_compute])
+	var compile_error := spirv.compile_error_compute + spirv.compile_error_vertex + spirv.compile_error_fragment
+	if !compile_error.is_empty():
+		push_error("%s %s: %s" % [path.get_file(), version, compile_error])
 		return RID()
 	return rd.shader_create_from_spirv(spirv)
 
@@ -1419,14 +1434,27 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	state.frame += 1
 	var view_count := buffers.get_view_count()
 	var raymarch_size := Vector2i(ceili(float(size.x) / raymarch_resolution), ceili(float(size.y) / raymarch_resolution))
+	# With 3D MSAA the scene is in multisampled textures until the end of the transparent pass, when
+	# Godot resolves the colour over anything written to the resolved one before (and its depth
+	# resolve averages the samples). The raymarch and resolve then run their msaa versions, which
+	# read the multisampled depth, and the resolve leaves its changes to the colour per surface
+	# (msaa_near, msaa_far) for SunshineClouds3MsaaComposite.glsl to blend into the multisampled
+	# colour a sample at a time.
+	var msaa := buffers.get_msaa_3d() != RenderingServer.VIEWPORT_MSAA_DISABLED
 	if buffers.has_texture(BUFFERS_CONTEXT, &"raymarch") && buffers.get_texture_slice_size(BUFFERS_CONTEXT, &"raymarch", 0) != raymarch_size:
 		buffers.clear_context(BUFFERS_CONTEXT)
+	# Turning MSAA on or off reconfigures the buffers, which frees these textures.
 	if !buffers.has_texture(BUFFERS_CONTEXT, &"raymarch"):
 		for i in VIEW_TEXTURES:
 			buffers.create_texture(BUFFERS_CONTEXT, VIEW_TEXTURE_NAMES[i],
 				RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT,
 				RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT,
 				RenderingDevice.TEXTURE_SAMPLES_1, raymarch_size if i == 2 || i == 3 else size, view_count, 1, true, false)
+		if msaa:
+			for texture_name : StringName in [&"msaa_near", &"msaa_far"]:
+				buffers.create_texture(BUFFERS_CONTEXT, texture_name, RenderingDevice.DATA_FORMAT_R32G32B32A32_UINT,
+					RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT,
+					RenderingDevice.TEXTURE_SAMPLES_1, size, view_count, 1, true, false)
 		state.prev_view_projections.clear()
 
 	# Visual profiler: ">" opens a folder and "<" closes it; each timestamp is an entry lasting
@@ -1712,8 +1740,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		_encode_vec4(params_bytes, 368, Vector3(ground_color.r, ground_color.g, ground_color.b), 0.0)
 		rd.buffer_update(params_buffer, 0, PARAMS_BYTES, params_bytes)
 
-		var color_layer := buffers.get_color_layer(view)
-		var depth_layer := buffers.get_depth_layer(view)
+		var color_layer := buffers.get_color_layer(view, msaa)
+		var depth_layer := buffers.get_depth_layer(view, msaa)
+		var msaa_near := buffers.get_texture_slice(BUFFERS_CONTEXT, &"msaa_near", view, 0, 1, 1) if msaa else RID()
+		var msaa_far := buffers.get_texture_slice(BUFFERS_CONTEXT, &"msaa_far", view, 0, 1, 1) if msaa else RID()
 		if view == 0: #TODO: Add timing offsets to make this only render every other frame or every 3rd etc, for performance modulation.
 			# The shadow map passes and point samples bind the same textures; their sets are rebuilt
 			# together. None reads the depth, so binding 1 gets a texture of ours instead of a
@@ -1922,7 +1952,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			for set_parity in 2:
 				var history := view_textures[1 - set_parity]
 				var history_b := view_textures[5 - set_parity]
-				state.raymarch_sets[view * 2 + set_parity] = UniformSetCacheRD.get_cache(shader, 0, [
+				state.raymarch_sets[view * 2 + set_parity] = UniformSetCacheRD.get_cache(raymarch_msaa_shader if msaa else shader, 0, [
 					depth,
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, [noise_sampler, noise_rid]),
 					params_uniform,
@@ -1938,8 +1968,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 26, [lights_buffer]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 27, [raymarch_b_texture]),
 				])
-				state.resolve_sets[view * 2 + set_parity] = UniformSetCacheRD.get_cache(resolve_shader, 0, [
-					_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 0, [color_layer]),
+				var resolve_uniforms : Array[RDUniform] = [
 					depth,
 					params_uniform,
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, [lut_sampler, history]),
@@ -1957,11 +1986,19 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 20, [noise_sampler, shadow_texture]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 29, [sky_buffer]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 30, [background_sampler, background_rid]),
-				])
+				]
+				if msaa:
+					resolve_uniforms.append(_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 31, [msaa_near]))
+					resolve_uniforms.append(_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 32, [msaa_far]))
+				else:
+					resolve_uniforms.append(_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 0, [color_layer]))
+				state.resolve_sets[view * 2 + set_parity] = UniformSetCacheRD.get_cache(resolve_msaa_shader if msaa else resolve_shader, 0, resolve_uniforms)
 
 		rd.capture_timestamp("Sunshine Clouds Raymarch")
 		var list := rd.compute_list_begin()
 		var raymarch_set := state.raymarch_sets[view * 2 + parity]
+		var raymarch_shader := raymarch_msaa_shader if msaa else shader
+		var raymarch_base := (MAX_LAYERS + 1) * 3 * int(msaa) + layer_count * 3
 		if interlace > 1 && history_valid:
 			# The texels traced this frame, then the reprojected rest (INTERLACE_PASS 1 and 2), each
 			# 4x4 tile's as a block of threads.
@@ -1970,21 +2007,26 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			for interlace_pass in 2:
 				var count := per_tile if interlace_pass == 0 else 16 - per_tile
 				var block_width := 4 if count % 4 == 0 else (count / 2 if count % 2 == 0 else count)
-				rd.compute_list_bind_compute_pipeline(list, _pipeline(raymarch_pipelines, layer_count * 3 + interlace_pass + 1, shader, layer_count, interlace_pass + 1))
+				rd.compute_list_bind_compute_pipeline(list, _pipeline(raymarch_pipelines, raymarch_base + interlace_pass + 1, raymarch_shader, layer_count, interlace_pass + 1))
 				rd.compute_list_bind_uniform_set(list, raymarch_set, 0)
 				rd.compute_list_dispatch(list, ceili(tiles.x * block_width / 8.0), ceili(tiles.y * (count / block_width) / 8.0), 1)
 		else:
-			rd.compute_list_bind_compute_pipeline(list, _pipeline(raymarch_pipelines, layer_count * 3, shader, layer_count, 0))
+			rd.compute_list_bind_compute_pipeline(list, _pipeline(raymarch_pipelines, raymarch_base, raymarch_shader, layer_count, 0))
 			rd.compute_list_bind_uniform_set(list, raymarch_set, 0)
 			rd.compute_list_dispatch(list, ceili(size.x / (8.0 * raymarch_resolution)), ceili(size.y / (8.0 * raymarch_resolution)), 1)
 		rd.compute_list_end()
 
 		rd.capture_timestamp("Sunshine Clouds Resolve")
 		list = rd.compute_list_begin()
-		rd.compute_list_bind_compute_pipeline(list, _pipeline(resolve_pipelines, int(atmosphere_enabled), resolve_shader, atmosphere_enabled))
+		rd.compute_list_bind_compute_pipeline(list, _pipeline(resolve_pipelines, int(atmosphere_enabled) + 2 * int(msaa),
+			resolve_msaa_shader if msaa else resolve_shader, atmosphere_enabled))
 		rd.compute_list_bind_uniform_set(list, state.resolve_sets[view * 2 + parity], 0)
 		rd.compute_list_dispatch(list, ceili(size.x / 8.0), ceili(size.y / 8.0), 1)
 		rd.compute_list_end()
+
+		if msaa:
+			rd.capture_timestamp("Sunshine Clouds MSAA Composite")
+			_msaa_composite(color_layer, msaa_near, msaa_far)
 
 		if history_valid:
 			state.prev_view_projections[view] = view_projection
@@ -1994,6 +2036,51 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		positionResetting = true
 		rd.buffer_get_data_async(point_sample_data_buffer, retrieve_position_queries)
 	rd.capture_timestamp("<Sunshine Clouds")
+
+
+## Blends the resolve's changes (msaa_near, msaa_far: colour * a + b per surface) into the
+## multisampled colour color_msaa through SunshineClouds3MsaaComposite.glsl, a sample at a time:
+## times a, then plus b, of the sample's surface (msaa_near's w).
+func _msaa_composite(color_msaa : RID, msaa_near : RID, msaa_far : RID) -> void:
+	var framebuffer := FramebufferCacheRD.get_cache_multipass([color_msaa], [], 1)
+	var samples := rd.texture_get_format(color_msaa).samples
+	var format := rd.framebuffer_get_format(framebuffer)
+	var pipelines : Array = msaa_composite_pipelines.get(format, [RID(), RID()])
+	for add in 2:
+		if pipelines[add].is_valid() && rd.render_pipeline_is_valid(pipelines[add]):
+			continue
+		var add_constant := RDPipelineSpecializationConstant.new()
+		add_constant.constant_id = 0
+		add_constant.value = add == 1
+		var multisample := RDPipelineMultisampleState.new()
+		# The shader reads gl_SampleID, which shades it per sample (the D3D12 driver rejects
+		# enable_sample_shading).
+		multisample.sample_count = samples
+		# Colour times the source, or plus it; the scene's alpha stays.
+		var attachment := RDPipelineColorBlendStateAttachment.new()
+		attachment.enable_blend = true
+		attachment.src_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE if add else RenderingDevice.BLEND_FACTOR_ZERO
+		attachment.dst_color_blend_factor = RenderingDevice.BLEND_FACTOR_ONE if add else RenderingDevice.BLEND_FACTOR_SRC_COLOR
+		attachment.color_blend_op = RenderingDevice.BLEND_OP_ADD
+		attachment.src_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ZERO
+		attachment.dst_alpha_blend_factor = RenderingDevice.BLEND_FACTOR_ONE
+		attachment.alpha_blend_op = RenderingDevice.BLEND_OP_ADD
+		var blend := RDPipelineColorBlendState.new()
+		blend.attachments = [attachment]
+		pipelines[add] = rd.render_pipeline_create(msaa_composite_shader, format, RenderingDevice.INVALID_FORMAT_ID,
+			RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), multisample,
+			RDPipelineDepthStencilState.new(), blend, 0, 0, [add_constant])
+	msaa_composite_pipelines[format] = pipelines
+	var uniform_set := UniformSetCacheRD.get_cache(msaa_composite_shader, 0, [
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, [nearest_sampler, msaa_near]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, [nearest_sampler, msaa_far]),
+	])
+	var draw_list := rd.draw_list_begin(framebuffer, RenderingDevice.DRAW_DEFAULT_ALL)
+	for add in 2:
+		rd.draw_list_bind_render_pipeline(draw_list, pipelines[add])
+		rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
+		rd.draw_list_draw(draw_list, false, 1, 3)
+	rd.draw_list_end()
 
 
 ## The skybox panorama, as the shadow map: rendered every skybox_update_interval frames into its

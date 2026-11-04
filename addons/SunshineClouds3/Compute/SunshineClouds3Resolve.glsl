@@ -1,5 +1,16 @@
+#[versions]
+
+resolve = "";
+msaa = "#define MSAA";
+
 #[compute]
 #version 450
+
+VERSION_DEFINES
+
+// The msaa version, with 3D MSAA (SunshineClouds3.gd): depth_texture is the multisampled depth
+// (Common), and the clouds go into msaa_near_image (and msaa_far_image) as colour * a + b instead
+// of onto color_image, for SunshineClouds3MsaaComposite.glsl to apply to the multisampled colour.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -16,7 +27,15 @@ layout(constant_id = 0) const bool ATMOSPHERE_ENABLED = true;
 #include "atmosphere/AtmosphereParameters.glslinc"
 #include "atmosphere/AtmosphereFunctions.glslinc"
 
+#ifdef MSAA
+// composite() as a and b (colour * a + b), as halves: x = a.rg, y = (a.b, b.r), z = b.gb; the near
+// image's w is the far samples' bits (msaa_far_samples(), Common). The far image only where the
+// pixel has samples on a far surface.
+layout(rgba32ui, set = 0, binding = 31) uniform restrict writeonly uimage2D msaa_near_image;
+layout(rgba32ui, set = 0, binding = 32) uniform restrict writeonly uimage2D msaa_far_image;
+#else
 layout(rgba16f, set = 0, binding = 0) uniform restrict image2D color_image;
+#endif
 // The raymarch's values (SunshineClouds3Raymarch.glsl's current_image and current_b_image) and
 // their accumulation, last frame's and this frame's. The second accumulation texture also holds
 // the scene distance: r = scene distance (km), g = sky ambient intensity, b = weighted cloud
@@ -50,42 +69,17 @@ shared vec3 tile_value_b[TILE_TEXELS]; // current_b_texture's
 shared vec2 tile_pixel[TILE_TEXELS]; // the pixel the texel traced
 shared float tile_distance[TILE_TEXELS]; // scene distance at that pixel
 
-void main() {
-	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+// The pixel's clouds for an opaque scene at max_distance (m): result = absorption and direct light,
+// result_b = sky ambient, weighted distance and ground ambient. This frame's values come from the
+// 3x3 raymarch texels around the pixel, each weighted by a tent of one block on the distance to the
+// pixel it traced. Only texels at a similar scene distance (or whose opaque cloud hides both, or
+// whose absorption matches the pixel's own: see same_cloud_own) count, so nothing bleeds across
+// silhouettes; they also give the range the history is clamped to. Interlaced, the traced texels
+// (the new ones) are also summed apart.
+void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin, vec3 ray_direction, float max_distance,
+		out vec4 result, out vec3 result_b) {
 	ivec2 size = ivec2(params.screen_size);
 	int divisor = params.raymarch_resolution;
-	ivec2 texel_max = raymarch_size() - 1;
-	ivec2 group_pixel = ivec2(gl_WorkGroupID.xy) * 8;
-	ivec2 tile_origin = group_pixel / divisor - 1;
-	int tile_width = (group_pixel.x + 7) / divisor + 2 - tile_origin.x;
-	int tile_texels = tile_width * ((group_pixel.y + 7) / divisor + 2 - tile_origin.y);
-	for (int i = int(gl_LocalInvocationIndex); i < tile_texels; i += 64) {
-		// Edge texels clamp, repeating the border ones.
-		ivec2 tile_texel = clamp(tile_origin + ivec2(i % tile_width, i / tile_width), ivec2(0), texel_max);
-		ivec2 traced = traced_pixel(tile_texel);
-		tile_value[i] = texelFetch(current_texture, tile_texel, 0);
-		tile_value_b[i] = texelFetch(current_b_texture, tile_texel, 0).xyz;
-		tile_pixel[i] = vec2(traced);
-		tile_distance[i] = scene_distance(traced);
-	}
-	memoryBarrierShared();
-	barrier();
-	if (pixel.x >= size.x || pixel.y >= size.y) {
-		return;
-	}
-	vec3 ray_origin;
-	vec3 ray_direction;
-	camera_ray(pixel, ray_origin, ray_direction);
-	float surface = surface_distance(pixel);
-	float max_distance = scene_distance(surface);
-
-	// This frame's values (a = absorption and direct light, b = sky ambient, weighted distance and
-	// ground ambient), from the 3x3 raymarch texels around the pixel, each weighted by a tent of one block on the
-	// distance to the pixel it traced. Only texels at a similar scene distance (or whose opaque cloud
-	// hides both, or whose absorption matches the pixel's own: see same_cloud_own) count, so nothing
-	// bleeds across silhouettes; they also give the range the history
-	// is clamped to. Interlaced,
-	// the traced texels (the new ones) are also summed apart.
 	ivec2 texel = pixel / divisor;
 	vec4 weighted_sum = vec4(0.0);
 	vec3 weighted_sum_b = vec3(0.0);
@@ -160,8 +154,8 @@ void main() {
 			neighbourhood_max_b = max(neighbourhood_max_b, neighbour_b);
 		}
 	}
-	vec4 result = closest;
-	vec3 result_b = closest_b;
+	result = closest;
+	result_b = closest_b;
 	// How much of this frame's values go into the history.
 	vec4 current = closest;
 	vec3 current_b = closest_b;
@@ -244,14 +238,12 @@ void main() {
 			result_b = mix(clamp(history_b.gba, neighbourhood_min_b, neighbourhood_max_b), current_b, current_weight);
 		}
 	}
-	imageStore(accumulation_image, pixel, result);
-	imageStore(accumulation_b_image, pixel, vec4(max_distance * 0.001, result_b));
+}
 
-	float light_absorption = result.x;
-
-	// Screen space cloud shadows, when the light can't take them as a projector: opaque surfaces
-	// are darkened (ambient included) by the sunlight the clouds leave them, fading out towards the
-	// edge of the map.
+// Screen space cloud shadows, when the light can't take them as a projector: opaque surfaces
+// are darkened (ambient included) by the sunlight the clouds leave them, fading out towards the
+// edge of the map.
+float surface_sunlight(vec3 ray_origin, vec3 ray_direction, float surface) {
 	float sunlight = 1.0;
 	if (shadow.screen_space != 0 && shadow.march_length > 0.0 && surface > 0.0 && surface < params.max_distance) {
 		float fade = 1.0 - smoothstep(shadow.fade_start, shadow.extent * 0.5, surface);
@@ -270,25 +262,27 @@ void main() {
 			sunlight = mix(1.0, cloud_sunlight, shadow.screen_space_strength * fade);
 		}
 	}
+	return sunlight;
+}
 
-	if (!ATMOSPHERE_ENABLED && light_absorption <= 0.0 && sunlight >= 1.0) {
-		return;
-	}
+// The scene's colour at a pixel (opaque scene at surface m, 0 for none) with its clouds (result,
+// result_b) and the atmosphere over it.
+vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b) {
+	float light_absorption = result.x;
 	AtmosphereParameters atmosphere = ATMOSPHERE;
-	vec4 color = imageLoad(color_image, pixel);
 	// How much of what's behind the clouds shows through them (the sky applies its own).
 	float background_visibility = 1.0 - light_absorption;
 	if (surface > 0.0) {
 		vec3 transmittance;
 		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, surface, 1.0, transmittance);
-		color.rgb = color.rgb * sunlight * transmittance + in_scatter;
+		color = color * sunlight * transmittance + in_scatter;
 	} else if (ATMOSPHERE_ENABLED) {
 		// The sky, and the background behind it (seen across about pixel_angle radians a pixel).
 		vec3 transmittance;
 		vec3 sky = sky_radiance(ray_origin, ray_direction, 1.0 - light_absorption, transmittance) * params.radiance_scale;
 		float pixel_angle = 2.0 * params.inv_projection[1][1] / float(params.screen_size.y);
 		sky += background_radiance(ray_direction, pixel_angle, transmittance, sky);
-		color.rgb = min(sky * (1.0 - light_absorption), vec3(MAX_RADIANCE));
+		color = min(sky * (1.0 - light_absorption), vec3(MAX_RADIANCE));
 		background_visibility = 1.0;
 	}
 	if (light_absorption > 0.0) {
@@ -309,7 +303,85 @@ void main() {
 		// blocked by the cloud's opacity too.
 		vec3 transmittance;
 		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, distance_to_cloud, 1.0 - light_absorption, transmittance);
-		color.rgb = color.rgb * background_visibility + cloud_color * transmittance + in_scatter * light_absorption;
+		color = color * background_visibility + cloud_color * transmittance + in_scatter * light_absorption;
 	}
+	return color;
+}
+
+#ifdef MSAA
+// composite() as colour * a + b, packed for SunshineClouds3MsaaComposite.glsl (w left to the caller).
+// It's affine in the colour: b is what it makes of black, a what white adds to that.
+uvec4 composite_affine(vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b) {
+	vec3 b = composite(vec3(0.0), ray_origin, ray_direction, surface, sunlight, result, result_b);
+	vec3 a = max(composite(vec3(1.0), ray_origin, ray_direction, surface, sunlight, result, result_b) - b, vec3(0.0));
+	b = min(b, vec3(MAX_RADIANCE));
+	return uvec4(packHalf2x16(a.rg), packHalf2x16(vec2(a.b, b.r)), packHalf2x16(b.gb), 0u);
+}
+#endif
+
+void main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size = ivec2(params.screen_size);
+	int divisor = params.raymarch_resolution;
+	ivec2 texel_max = raymarch_size() - 1;
+	ivec2 group_pixel = ivec2(gl_WorkGroupID.xy) * 8;
+	ivec2 tile_origin = group_pixel / divisor - 1;
+	int tile_width = (group_pixel.x + 7) / divisor + 2 - tile_origin.x;
+	int tile_texels = tile_width * ((group_pixel.y + 7) / divisor + 2 - tile_origin.y);
+	for (int i = int(gl_LocalInvocationIndex); i < tile_texels; i += 64) {
+		// Edge texels clamp, repeating the border ones.
+		ivec2 tile_texel = clamp(tile_origin + ivec2(i % tile_width, i / tile_width), ivec2(0), texel_max);
+		ivec2 traced = traced_pixel(tile_texel);
+		tile_value[i] = texelFetch(current_texture, tile_texel, 0);
+		tile_value_b[i] = texelFetch(current_b_texture, tile_texel, 0).xyz;
+		tile_pixel[i] = vec2(traced);
+		tile_distance[i] = scene_distance(traced);
+	}
+	memoryBarrierShared();
+	barrier();
+	if (pixel.x >= size.x || pixel.y >= size.y) {
+		return;
+	}
+	vec3 ray_origin;
+	vec3 ray_direction;
+	camera_ray(pixel, ray_origin, ray_direction);
+#ifdef MSAA
+	// The near surface is the one reconstructed and kept in the history; where the pixel also has
+	// samples on a far one, that one's clouds are reconstructed too (below).
+	float near_depth;
+	float far_depth;
+	uint far_samples = msaa_far_samples(pixel, near_depth, far_depth);
+	float surface = surface_distance(pixel, near_depth);
+#else
+	float surface = surface_distance(pixel);
+#endif
+	float max_distance = scene_distance(surface);
+
+	vec4 result;
+	vec3 result_b;
+	reconstruct(pixel, tile_origin, tile_width, ray_origin, ray_direction, max_distance, result, result_b);
+	imageStore(accumulation_image, pixel, result);
+	imageStore(accumulation_b_image, pixel, vec4(max_distance * 0.001, result_b));
+
+	float sunlight = surface_sunlight(ray_origin, ray_direction, surface);
+#ifdef MSAA
+	uvec4 near_composite = composite_affine(ray_origin, ray_direction, surface, sunlight, result, result_b);
+	near_composite.w = far_samples;
+	imageStore(msaa_near_image, pixel, near_composite);
+	if (far_samples != 0u) {
+		float far_surface = surface_distance(pixel, far_depth);
+		vec4 far_result;
+		vec3 far_result_b;
+		reconstruct(pixel, tile_origin, tile_width, ray_origin, ray_direction, scene_distance(far_surface), far_result, far_result_b);
+		imageStore(msaa_far_image, pixel, composite_affine(ray_origin, ray_direction, far_surface,
+				surface_sunlight(ray_origin, ray_direction, far_surface), far_result, far_result_b));
+	}
+#else
+	if (!ATMOSPHERE_ENABLED && result.x <= 0.0 && sunlight >= 1.0) {
+		return;
+	}
+	vec4 color = imageLoad(color_image, pixel);
+	color.rgb = composite(color.rgb, ray_origin, ray_direction, surface, sunlight, result, result_b);
 	imageStore(color_image, pixel, color);
+#endif
 }

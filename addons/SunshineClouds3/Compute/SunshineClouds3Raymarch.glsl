@@ -1,6 +1,7 @@
 #[versions]
 
 raymarch = "#define RAYMARCH";
+raymarch_msaa = "#define RAYMARCH\n#define MSAA";
 shadow_map = "#define SHADOW_MAP";
 shadow_blend = "#define SHADOW_BLEND";
 skybox = "#define SKYBOX";

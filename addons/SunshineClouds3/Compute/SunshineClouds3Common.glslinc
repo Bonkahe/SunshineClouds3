@@ -1,7 +1,12 @@
 // Shared by SunshineClouds3Raymarch.glsl and SunshineClouds3Resolve.glsl. Define CLOUD_SHADOWS
-// before including it for the Shadow block.
+// before including it for the Shadow block, and MSAA for the versions used with 3D MSAA, which
+// read the multisampled depth (see msaa_nearest_depth()).
 
+#ifdef MSAA
+layout(set = 0, binding = 1) uniform sampler2DMS depth_texture;
+#else
 layout(set = 0, binding = 1) uniform sampler2D depth_texture;
+#endif
 
 // std140, 384 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
 layout(set = 0, binding = 3, std140) uniform Params {
@@ -194,7 +199,68 @@ vec3 atmosphere_position(vec3 world) {
 	return radius * vec3(horizontal.x, cos(angle), horizontal.y);
 }
 
-// Distance (m) to the opaque scene at a pixel; 0 where nothing was drawn (reverse Z).
+#ifdef MSAA
+// With 3D MSAA every depth the clouds use is a real sample's. Godot's own depth resolve averages
+// the samples, which at a silhouette is a surface between the two that isn't there. The nearest
+// sample's (reverse Z: the largest) is what the raymarch traces to and the resolve reconstructs
+// and keeps history for, as the depth is without MSAA.
+float msaa_nearest_depth(ivec2 pixel) {
+	float nearest = 0.0;
+	for (int i = 0; i < textureSamples(depth_texture); i++) {
+		nearest = max(nearest, texelFetch(depth_texture, pixel, i).r);
+	}
+	return nearest;
+}
+
+// How alike two depths are: smaller over larger, 1 when equal (both 0: nothing drawn). Under a
+// perspective projection reverse Z depth goes with 1 / distance, so it's their distances' ratio.
+float depth_ratio(float a, float b) {
+	return a == b ? 1.0 : min(a, b) / max(a, b);
+}
+
+// Which of a pixel's samples are on its far surface rather than its near one (bit i for sample
+// i; each goes with the one its depth is more alike), and both surfaces' depths (nearest as
+// msaa_nearest_depth()): the resolve reconstructs the far surface's clouds too and the composite
+// gives those samples them. 0 when the farthest sample is near enough to the nearest for their
+// clouds to be the same (same_cloud's half distance), as on a sloped surface.
+uint msaa_far_samples(ivec2 pixel, out float nearest, out float farthest) {
+	int samples = textureSamples(depth_texture);
+	nearest = 0.0;
+	farthest = 1e30;
+	for (int i = 0; i < samples; i++) {
+		float depth = texelFetch(depth_texture, pixel, i).r;
+		nearest = max(nearest, depth);
+		farthest = min(farthest, depth);
+	}
+	uint far_samples = 0u;
+	if (depth_ratio(nearest, farthest) < 0.5) {
+		for (int i = 0; i < samples; i++) {
+			float depth = texelFetch(depth_texture, pixel, i).r;
+			if (depth_ratio(depth, farthest) > depth_ratio(depth, nearest)) {
+				far_samples |= 1u << uint(i);
+			}
+		}
+	}
+	return far_samples;
+}
+
+// Distance (m) to the opaque scene at a pixel of the given depth; 0 where nothing was drawn.
+float surface_distance(ivec2 pixel, float depth) {
+	if (depth <= 0.0) {
+		return 0.0;
+	}
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_size);
+	vec4 scene_view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
+	return length(scene_view.xyz / scene_view.w);
+}
+
+float surface_distance(ivec2 pixel) {
+	return surface_distance(pixel, msaa_nearest_depth(pixel));
+}
+#else
+// Distance (m) to the opaque scene at a pixel; 0 where nothing was drawn (reverse Z). The MSAA
+// versions' is a function of the depth; this one is kept whole: a call in it changes the
+// raymarch's compiled code, which measured slower.
 float surface_distance(ivec2 pixel) {
 	float depth = texelFetch(depth_texture, pixel, 0).r;
 	if (depth <= 0.0) {
@@ -204,6 +270,7 @@ float surface_distance(ivec2 pixel) {
 	vec4 scene_view = params.inv_projection * vec4(uv * 2.0 - 1.0, depth, 1.0);
 	return length(scene_view.xyz / scene_view.w);
 }
+#endif
 
 // The clouds' range from a surface_distance(): up to the opaque scene, or max_distance.
 float scene_distance(float surface) {
