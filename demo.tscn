@@ -13,6 +13,7 @@
 [ext_resource type="Script" uid="uid://ciwtkox7cf2er" path="res://addons/SunshineClouds3/SunshineClouds3Driver.gd" id="11_l07pr"]
 [ext_resource type="Script" uid="uid://cg2nybl8tbgrp" path="res://addons/SunshineClouds3/Resources/CloudDirectionalLightSettings.gd" id="12_vtas4"]
 [ext_resource type="Script" uid="uid://djgbllsd1m6ar" path="res://addons/SunshineClouds3/Resources/CloudEffectorSettings.gd" id="13_36gju"]
+[ext_resource type="Shader" uid="uid://cggqpeec0dipi" path="res://addons/SunshineClouds3/Resources/Shaders/SunshineClouds3SSR.gdshader" id="14_tql22"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_bej8n"]
 sky_horizon_color = Color(0.66224277, 0.6717428, 0.6867428, 1)
@@ -56,6 +57,12 @@ needs_motion_vectors = false
 needs_normal_roughness = false
 script = ExtResource("10_hu8bq")
 layers = Array[ExtResource("8_y4qkf")]([SubResource("Resource_jbdfk")])
+skybox_resolution = 256
+skybox_radiance_size = 3
+skybox_cloud_steps = 32
+skybox_cloud_light_steps = 8
+skybox_cloud_distance = 30000.0
+reflections_enabled = true
 has_last_directional = true
 last_directional_directions = PackedVector3Array(0.7117084, 0.5371706, -0.4526798)
 last_directional_radiance = PackedVector3Array(1, 1, 1)
@@ -75,6 +82,21 @@ script = ExtResource("13_36gju")
 top_radius = 100.0
 bottom_radius = 100.0
 height = 5000.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_y6i4o"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_0qyqa"]
+render_priority = 0
+shader = ExtResource("14_tql22")
+shader_parameter/albedo = Color(0.02, 0.03, 0.035, 1)
+shader_parameter/roughness = 0.05200000247
+shader_parameter/fresnel_f0 = 0.02
+shader_parameter/reflection_strength = 1.0
+shader_parameter/march_distance = 10000.0
+shader_parameter/march_steps = 4
+shader_parameter/refine_steps = 6
+shader_parameter/thickness = 1.0
+shader_parameter/screen_edge_fade = 0.170000008075
 
 [node name="DemoScene" type="Node3D" unique_id=1070852390]
 
@@ -110,3 +132,8 @@ mesh = SubResource("CylinderMesh_svejp")
 [node name="MeshInstance3D3" type="MeshInstance3D" parent="." unique_id=1095987976]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10000, 2500, 0)
 mesh = SubResource("CylinderMesh_svejp")
+
+[node name="CSGSphere3D" type="MeshInstance3D" parent="." unique_id=1753401533]
+transform = Transform3D(9939.2295, 0, 0, 0, 9939.2295, 0, 0, 0, 9939.2295, -1050.9292, 0, 3140.4036)
+mesh = SubResource("PlaneMesh_y6i4o")
+surface_material_override/0 = SubResource("ShaderMaterial_0qyqa")

@@ -4,7 +4,7 @@ Raymarched volumetric clouds and a physically based atmosphere for Godot 4, buil
 
 SunshineClouds 3 is a complete rebuild of [SunshineClouds 2](https://github.com/Bonkahe/SunshineClouds2). I tried to implement a lot of the features people were wanting with the previous one (layers, multiple cameras/VR support, less edge artifacts and generally just easier implementation/startup)
 
-> **NOTE:** SunshineClouds 3 is still in pretty early development (currently not even in the asset library/store). Settings and defaults may change between versions, and a couple of core features have not been brought over yet from sunshine clouds 2. See [Not yet implemented](#not-yet-implemented).
+> **NOTE:** SunshineClouds 3 is still in pretty early development (currently not even in the asset library/store). Settings and defaults may change between versions, and a feature of sunshine clouds 2 has not been brought over. See [Not yet implemented](#not-yet-implemented).
 
 ## What it's for
 
@@ -41,6 +41,7 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 * Precomputed atmospheric scattering (Rayleigh, Mie and ozone, multiple scattering orders), based on Eric Bruneton's model. Fully adjustable: planet radius, atmosphere height, haze, scattering heights and more.
 * **Skybox generation**: renders the atmosphere, background and a coarse pass of the clouds into a panorama and uses it as your `WorldEnvironment`'s sky. Reflections and ambient light follow the time of day and the cloud cover.
 * **Background panorama** behind the atmosphere (stars, nebulae and so on). It fades in as the sky darkens and can be rotated to move the stars through the night.
+* **Reflection image for screen-space reflections**: the finished frame, with the clouds in it, and each pixel's distance, as a global shader parameter your materials can reflect. Comes with a basic SSR material, plus a frosted glass material for UI. See [Screen-space reflections](#screen-space-reflections).
 * **Spherical planet mode**: curves the cloud layers, atmosphere and shadows around a planet center, for scenes that go up to orbit or cover planetary distances. This is still a bit work in progress, and isn't compatable with some features like coverage noise and directional light color being driven by the clouds driver, I want to work on this, but in some ways it's dependent on the cloud shadows for making it better.
 
 ### Cloud shadows
@@ -56,6 +57,7 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 * Adaptive step sizes: coarse steps through empty sky, fine steps once a ray finds cloud, and longer steps with distance.
 * Shadow maps and the skybox update every N frames and blend in between.
 * Per-viewport buffers, so multiple cameras and viewports each get their own clouds.
+* **MSAA support** (2x, 4x and 8x). Where a pixel's samples cover two surfaces, such as an object's edge against the sky or a cloud behind it, the clouds are rebuilt for each surface and blended into the multisampled image sample by sample. Cloud edges then get the same antialiasing as the geometry. With MSAA off there is no extra cost; with it on, expect roughly 0.5 ms more at 2x and 4x and 1 ms at 8x (1080p, RTX 3070).
 
 ### Editor workflow
 * **One-click setup** from *Project > Tools > Add Sunshine Clouds to Scene* (see below).
@@ -66,10 +68,9 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 
 ## Not yet implemented
 
-These SunshineClouds 2 features are **not available in SunshineClouds 3 yet**:
+This SunshineClouds 2 feature is **not available in SunshineClouds 3**:
 
-* **MSAA support**: the clouds don't support MSAA at the moment. Keep MSAA off on viewports that render clouds.
-* **Cloud painting**: the editor tools for painting cloud density and color are not implemented yet. For now, clouds are procedural, shaped by layers, noise and effectors.
+* **World-space cloud painting**: the editor tools for painting cloud density and color into the world aren't planned for now. I have some ideas for a different approach to shaping clouds by hand that I may pursue later, rather than bringing the previous implementation over. Until then, clouds are procedural, shaped by layers, noise and effectors.
 
 ## Requirements
 
@@ -96,7 +97,7 @@ You can run it again any time to connect directional lights you've added since.
 ### A few things to turn on
 
 * **Wind** is off by default. Enable *Iterate Wind In Game* (and *Iterate Wind In Editor* if you want to see it while editing) on the driver.
-* **Skybox** is off by default. Enable *Skybox > Skybox Enabled* on the clouds resource to have the atmosphere drive your scene's sky, reflections and ambient light. The driver needs its *World Environment* set, which the setup tool does.
+* **Skybox** is on by default (*Skybox > Skybox Enabled* on the clouds resource): the atmosphere drives your scene's sky, reflections and ambient light. The driver needs its *World Environment* set, which the setup tool does. Turn it off to keep your own sky.
 
 ### Manual setup
 
@@ -158,6 +159,14 @@ If your project shifts the world origin, set the driver's `origin_offset` to the
 
 When projectors aren't available, the driver logs a warning and the effect falls back to *Screen Space* shadows. You can also choose *Screen Space* directly. It works on any Godot build.
 
+## Screen-space reflections
+
+Turn on *Reflections > Reflections Enabled* on the clouds resource, and the clouds write the finished frame into an image every frame, exposed as the global shader parameter *Reflection Parameter* (`sunshine_clouds_reflection` by default; read it with `global uniform sampler2D sunshine_clouds_reflection;`). RGB is the frame's linear colour with the clouds, before transparent objects and post-processing, and alpha is the distance in metres to the opaque surface at each pixel (the clouds' *Max Distance* for sky). Press *Add To Project Shader Globals* once so materials using it compile whenever they load. Draw reflective surfaces in the transparent pass so they read the current frame. The image comes from the largest viewport drawing the clouds. With reflections off, nothing is allocated or drawn; on, it costs about 0.1 ms at 1080p. `Resources/Shaders/SunshineClouds3SSR.gdshader` is a basic SSR material using it, meant only as a rough starting point.
+
+### Glass UI
+
+`Resources/Shaders/SunshineClouds3GlassUI.gdshader` is a `canvas_item` material for frosted and refracting glass panels: put it on a `ColorRect` over your 3D view for blur, distortion, a bevelled rim, tint and rounded corners. With `#define USE_SCREEN_COLOR` (the default) it only uses Godot's screen texture and doesn't need the clouds at all. Comment that line out to read the reflection image instead, which blurs what's behind the panel more the farther away it is (needs reflections on).
+
 ## Contribution
 
 Feel free to make PRs or issues here, I'll fix them as I'm able. I'd love to see whatever you all come up with!
@@ -165,8 +174,8 @@ For questions feel free to hit me up on Discord: [https://discord.com/invite/zGM
 Thank you so much to all the wonderful people who support me.
 
 ### Current outstanding issues and limitations
-* MSAA is not supported yet.
-* Cloud painting is not implemented yet.
+* The reflection image for screen-space reflections comes from one viewport, the largest drawing the clouds. Reflective materials in other viewports, and the right eye in VR, reflect the wrong view. It's taken before the transparent pass, so transparent objects aren't in it.
+* World-space cloud painting isn't planned for now (see [Not yet implemented](#not-yet-implemented)).
 * Projector cloud shadows need a custom Godot build until directional light projectors are merged.
 * Spherical planet mode:
   * Coverage noise is still sampled in flat world space, so set each layer's *Coverage Noise Strength* to 0 when using it.

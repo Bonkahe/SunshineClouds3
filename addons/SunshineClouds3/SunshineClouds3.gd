@@ -12,7 +12,8 @@ const SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3Raymar
 const RESOLVE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3Resolve.glsl"
 const ATMOSPHERE_PRECOMPUTE_PATH := "res://addons/SunshineClouds3/Compute/atmosphere/AtmospherePrecompute.glsl"
 const MSAA_COMPOSITE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3MsaaComposite.glsl"
-const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMPUTE_PATH, MSAA_COMPOSITE_SHADER_PATH]
+const REFLECTION_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3Reflection.glsl"
+const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMPUTE_PATH, MSAA_COMPOSITE_SHADER_PATH, REFLECTION_SHADER_PATH]
 
 ## I wouldn't change this, as 32 sample points per frame should be enough, and it buffers so if you go over that one frame and under it the other the ones missed will roll over.
 const MAX_SAMPLE_POINTS := 32
@@ -320,6 +321,23 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 ## How far along a skybox ray the clouds are marched.
 @export_range(1000.0, 200000.0, 100.0, "or_greater", "suffix:m") var skybox_cloud_distance : float = 10000.0
 
+@export_group("Reflections")
+## Writes the frame's colour with the clouds in it, and how far away each pixel is, into one image
+## every frame, for screen-space reflection materials (Resources/Shaders/SunshineClouds3SSR.gdshader
+## is a basic one).
+@export var reflections_enabled : bool = false:
+	set(value):
+		reflections_enabled = value
+		_queue_reflection_update()
+## The global shader parameter (sampler2D) the image is set as.
+@export var reflection_parameter : StringName = &"sunshine_clouds_reflection":
+	set(value):
+		reflection_parameter = value
+		_queue_reflection_update()
+## Adds reflection_parameter to Project Settings > Globals > Shader Globals (sampler2D), so
+## materials that read it compile whenever they load.
+@export_tool_button("Add To Project Shader Globals", "Add") var add_reflection_global_action = add_reflection_parameter_to_project
+
 @export_group("Noise Textures")
 @export_subgroup("Noise Composite")
 @export var noise_texture : Texture3D = preload("res://addons/SunshineClouds3/Compute/NoiseTextures/NoiseComposite.res")
@@ -466,6 +484,17 @@ var skybox_version := 0
 # When a driver last asked for the skybox (request_skybox()); -1 = never.
 var skybox_requested_msec := -1
 
+var reflection_texture : Texture2DRD
+var reflection_global := &""
+var reflection_global_added := false
+var reflection_update_queued := false
+var reflection_rd : RID
+var reflection_size := Vector2i.ZERO
+var reflection_owner := 0
+var reflection_shaders : Array[RID] = [RID(), RID()]
+var reflection_pipelines : Array[RID] = [RID(), RID()]
+var reflection_push := PackedByteArray()
+
 # Upload staging, sized in _initialize().
 var params_bytes := PackedByteArray()
 var layers_bytes := PackedByteArray()
@@ -563,6 +592,10 @@ class ViewportState:
 	var raymarch_sets : Array[RID] = []
 	var resolve_sets : Array[RID] = []
 	var set_inputs := PackedInt64Array()
+	# While reflections are on: its internal size in pixels and the engine frame it last drew, which
+	# pick the viewport writing the reflection image.
+	var reflection_pixels := 0
+	var reflection_frame := -1
 
 
 ## Queues a cloud density sample at position (world space): callable is called with
@@ -580,6 +613,160 @@ func add_sample(callable : Callable, position : Vector3):
 ## WorldEnvironment: it's rendered only while asked for.
 func request_skybox() -> void:
 	skybox_requested_msec = Time.get_ticks_msec()
+
+
+## The reflection image (see reflections_enabled) as a texture: also the global shader
+## parameter's value. It can be given to a material's own uniform instead of using the global. Null
+## while reflections are off; the same texture while they stay on (its size follows the viewport).
+func get_reflection_texture() -> Texture2DRD:
+	return reflection_texture
+
+
+## Adds reflection_parameter to the project's shader globals (a sampler2D without a texture; the
+## effect sets the texture at run time), and saves the project settings. In the editor.
+func add_reflection_parameter_to_project() -> void:
+	if reflection_parameter == &"":
+		push_warning("SunshineClouds3: reflection_parameter is empty.")
+		return
+	var setting := "shader_globals/" + String(reflection_parameter)
+	if ProjectSettings.has_setting(setting):
+		print("SunshineClouds3: %s is already a project shader global." % reflection_parameter)
+		return
+	ProjectSettings.set_setting(setting, {"type": "sampler2D", "value": ""})
+	ProjectSettings.save()
+	# The editor's RenderingServer gets it as the shader globals editor would add it.
+	if !RenderingServer.global_shader_parameter_get_list().has(reflection_parameter):
+		RenderingServer.global_shader_parameter_add(reflection_parameter, RenderingServer.GLOBAL_VAR_TYPE_SAMPLER2D, RID())
+	reflection_global = &""
+	_update_reflection_global()
+	print("SunshineClouds3: added %s to the project's shader globals." % reflection_parameter)
+
+
+func _queue_reflection_update() -> void:
+	if !reflection_update_queued:
+		reflection_update_queued = true
+		_update_reflection_global.call_deferred()
+
+
+
+func _update_reflection_global() -> void:
+	reflection_update_queued = false
+	if RenderingServer.get_rendering_device() == null:
+		return
+	var wanted := reflection_parameter if reflections_enabled else &""
+	if wanted != reflection_global:
+		_release_reflection_global()
+	if !reflections_enabled:
+		if reflection_texture:
+			reflection_texture = null
+			RenderingServer.call_on_render_thread(_free_reflection_image)
+		return
+	if reflection_texture == null:
+		reflection_texture = Texture2DRD.new()
+		# A cleared image (distance 0: no image yet) until a viewport writes the real one.
+		RenderingServer.call_on_render_thread(_create_reflection_image.bind(Vector2i(4, 4)))
+	if wanted == &"" || wanted == reflection_global:
+		return
+	var existing := _existing_global_type(wanted)
+	if existing == "":
+		RenderingServer.global_shader_parameter_add(wanted, RenderingServer.GLOBAL_VAR_TYPE_SAMPLER2D, reflection_texture.get_rid())
+		reflection_global_added = true
+	elif existing == "sampler2D":
+		RenderingServer.global_shader_parameter_set(wanted, reflection_texture.get_rid())
+		reflection_global_added = false
+	else:
+		push_warning("SunshineClouds3: the shader global %s is a %s, not a sampler2D; the reflection image isn't set as it." % [wanted, existing])
+		return
+	reflection_global = wanted
+
+
+func _existing_global_type(global_name : StringName) -> String:
+	var setting := "shader_globals/" + String(global_name)
+	if ProjectSettings.has_setting(setting):
+		var value : Variant = ProjectSettings.get_setting(setting)
+		return String(value.get("type", "")) if value is Dictionary else "?"
+	if Engine.is_editor_hint() && RenderingServer.global_shader_parameter_get_list().has(global_name):
+		return "sampler2D" if RenderingServer.global_shader_parameter_get_type(global_name) == RenderingServer.GLOBAL_VAR_TYPE_SAMPLER2D else "?"
+	return ""
+
+
+func _release_reflection_global() -> void:
+	if reflection_global == &"":
+		return
+	if reflection_global_added:
+		RenderingServer.global_shader_parameter_remove(reflection_global)
+	elif _existing_global_type(reflection_global) == "sampler2D":
+		RenderingServer.global_shader_parameter_set(reflection_global, RID())
+	reflection_global = &""
+	reflection_global_added = false
+
+
+func _create_reflection_image(size : Vector2i) -> void:
+	if rd == null || reflection_texture == null:
+		return
+	if reflection_rd.is_valid():
+		_retire(reflection_rd)
+	var format := RDTextureFormat.new()
+	format.width = size.x
+	format.height = size.y
+	format.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
+	format.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
+	reflection_rd = rd.texture_create(format, RDTextureView.new())
+	rd.texture_clear(reflection_rd, Color(0.0, 0.0, 0.0, 0.0), 0, 1, 0, 1)
+	reflection_size = size
+	reflection_texture.texture_rd_rid = reflection_rd
+
+
+func _free_reflection_image() -> void:
+	if reflection_rd.is_valid():
+		_retire(reflection_rd)
+	reflection_rd = RID()
+	reflection_size = Vector2i.ZERO
+	reflection_owner = 0
+
+
+func _is_reflection_owner(buffers : RenderSceneBuffersRD, state : ViewportState, size : Vector2i, engine_frame : int) -> bool:
+	state.reflection_pixels = size.x * size.y
+	state.reflection_frame = engine_frame
+	var id := buffers.get_instance_id()
+	if id != reflection_owner:
+		var owner : ViewportState = viewport_states.get(reflection_owner)
+		if owner == null || owner.reflection_frame < engine_frame - 1 || state.reflection_pixels > owner.reflection_pixels:
+			reflection_owner = id
+	return id == reflection_owner
+
+
+func _write_reflection(color_layer : RID, depth_layer : RID, msaa : bool, size : Vector2i, inv_projection : Projection) -> void:
+	if !reflection_shaders[0].is_valid():
+		var copy_shader := _load_shader(REFLECTION_SHADER_PATH, &"copy")
+		var msaa_shader := _load_shader(REFLECTION_SHADER_PATH, &"msaa")
+		if !copy_shader.is_valid() || !msaa_shader.is_valid():
+			for s : RID in [copy_shader, msaa_shader]:
+				if s.is_valid():
+					rd.free_rid(s)
+			return
+		reflection_shaders = [copy_shader, msaa_shader]
+		reflection_pipelines = [rd.compute_pipeline_create(copy_shader), rd.compute_pipeline_create(msaa_shader)]
+		reflection_push.resize(80)
+	if reflection_size != size || !rd.texture_is_valid(reflection_rd):
+		_create_reflection_image(size)
+	var version := int(msaa)
+	_encode_mat4(reflection_push, 0, inv_projection)
+	reflection_push.encode_u32(64, size.x)
+	reflection_push.encode_u32(68, size.y)
+	reflection_push.encode_float(72, max_distance * cloud_scale)
+	var uniform_set := UniformSetCacheRD.get_cache(reflection_shaders[version], 0, [
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, [nearest_sampler, color_layer]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, [nearest_sampler, depth_layer]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 2, [reflection_rd]),
+	])
+	var list := rd.compute_list_begin()
+	rd.compute_list_bind_compute_pipeline(list, reflection_pipelines[version])
+	rd.compute_list_bind_uniform_set(list, uniform_set, 0)
+	rd.compute_list_set_push_constant(list, reflection_push, reflection_push.size())
+	rd.compute_list_dispatch(list, ceili(size.x / 8.0), ceili(size.y / 8.0), 1)
+	rd.compute_list_end()
 
 
 func _init() -> void:
@@ -603,9 +790,16 @@ func _notification(what : int) -> void:
 		nearest_sampler, noise_sampler, lut_sampler, background_sampler,
 		params_buffer, layers_buffer, shadow_buffer, sky_buffer, atmosphere_buffer, point_sample_data_buffer, lights_buffer,
 		transmittance_texture, scattering_texture, irradiance_texture, shadow_texture, shadow_keys[0], shadow_keys[1],
-		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture]
+		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture, reflection_shaders[0], reflection_shaders[1]]
+	# A global this effect added goes with it (written out: its own functions can't be called here).
+	if reflection_global != &"" && reflection_global_added:
+		RenderingServer.global_shader_parameter_remove(reflection_global)
+	if rd.texture_is_valid(reflection_rd):
+		rids.append(reflection_rd)
 	rids.append_array(precompute_shaders)
-	rids.append_array(retired_textures)
+	for texture in retired_textures:
+		if rd.texture_is_valid(texture):
+			rids.append(texture)
 	for rid in rids:
 		if rid.is_valid():
 			rd.free_rid(rid)
@@ -922,6 +1116,12 @@ func _create_shaders() -> bool:
 	resolve_msaa_shader = new_shaders[7]
 	msaa_composite_shader = new_shaders[8]
 	msaa_composite_pipelines.clear()
+	# The reflection shaders load again the next time they're used.
+	for s : RID in reflection_shaders:
+		if s.is_valid():
+			rd.free_rid(s)
+	reflection_shaders = [RID(), RID()]
+	reflection_pipelines = [RID(), RID()]
 	precompute_shaders = new_shaders.slice(9)
 	sample_shader = new_sample_shader
 
@@ -1418,7 +1618,9 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	if first_viewport:
 		for i in range(retired_textures.size() - 1, -1, -1):
 			if engine_frame >= retired_frames[i]:
-				rd.free_rid(retired_textures[i])
+				# A reflection image may have gone with its Texture2DRD's RenderingServer texture.
+				if rd.texture_is_valid(retired_textures[i]):
+					rd.free_rid(retired_textures[i])
 				retired_textures.remove_at(i)
 				retired_frames.remove_at(i)
 		# Forget viewports that are gone (their buffers freed our textures with them).
@@ -1432,6 +1634,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		state = ViewportState.new()
 		viewport_states[buffers.get_instance_id()] = state
 	state.frame += 1
+	# Whether this viewport writes the reflection image (its first view's) this frame.
+	var reflect := reflections_enabled && reflection_texture != null && _is_reflection_owner(buffers, state, size, engine_frame)
 	var view_count := buffers.get_view_count()
 	var raymarch_size := Vector2i(ceili(float(size.x) / raymarch_resolution), ceili(float(size.y) / raymarch_resolution))
 	# With 3D MSAA the scene is in multisampled textures until the end of the transparent pass, when
@@ -2027,6 +2231,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		if msaa:
 			rd.capture_timestamp("Sunshine Clouds MSAA Composite")
 			_msaa_composite(color_layer, msaa_near, msaa_far)
+
+		if reflect && view == 0:
+			rd.capture_timestamp("Sunshine Clouds Reflection")
+			_write_reflection(color_layer, depth_layer, msaa, size, projection.inverse())
 
 		if history_valid:
 			state.prev_view_projections[view] = view_projection

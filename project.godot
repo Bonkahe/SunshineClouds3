@@ -39,3 +39,10 @@ joypads/ignore_joypad_on_unfocused_application=true
 
 rendering_device/driver.windows="d3d12"
 lights_and_shadows/multi_bounce_occlusion/enabled=true
+
+[shader_globals]
+
+sunshine_clouds_reflection={
+"type": "sampler2D",
+"value": ""
+}
