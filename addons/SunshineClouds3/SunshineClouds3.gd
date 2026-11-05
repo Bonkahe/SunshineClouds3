@@ -19,9 +19,21 @@ const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMP
 const MAX_SAMPLE_POINTS := 32
 const SAMPLE_BUFFER_BYTES := MAX_SAMPLE_POINTS * 16
 const SHADOW_BYTES := 208
-const PARAMS_BYTES := 384
+const PARAMS_BYTES := 512
+## Lights further below the horizon than this (the cosine of their angle to the vertical) light none
+## of the atmosphere and are left out of it: Bruneton's mu_s_min (102 degrees, the end of twilight;
+## see the atmosphere's encoding), less 0.03 for points up to some 200 km from the camera, where the
+## vertical has tilted.
+const ATMOSPHERE_LIGHT_MIN_MU := -0.238
+## Meta a SunshineClouds3Driver sets on a directional light it hid below the horizon (see
+## CloudDirectionalLightSettings.drive_light_color): the clouds and the atmosphere keep it as shown.
+const BELOW_HORIZON_META := &"_sunshine_clouds3_below_horizon"
 const ATMOSPHERE_BYTES := 304
 const SKY_BYTES := 144
+## The Heightmap block in SunshineClouds3Raymarch.glsl.
+const HEIGHTMAP_BYTES := 48
+## The raymarch shader's versions with the terrain heightmap, loaded the first time it's on.
+const HEIGHTMAP_VERSIONS : Array[StringName] = [&"raymarch_heightmap", &"raymarch_msaa_heightmap", &"shadow_map_heightmap", &"skybox_heightmap", &"sample_points_heightmap"]
 
 ## Can be changed but you will have to acocunt for it in the SunshineClouds3Common.glslinc
 const MAX_LAYERS := 8 
@@ -56,7 +68,7 @@ const MAX_OZONE_NUMBER_DENSITY := 300.0 * 2.687e20 / 15000.0
 const BUFFERS_CONTEXT := &"SunshineClouds3"
 const VIEW_TEXTURE_NAMES : Array[StringName] = [&"history_0", &"history_1", &"raymarch", &"raymarch_b", &"history_b_0", &"history_b_1"]
 const VIEW_TEXTURES := 6
-const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
+const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 
 
 @export_group("Layers")
@@ -144,6 +156,10 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 ## in front of the clouds, and the sky light on the clouds and the skybox's ground.
 @export_color_no_alpha var atmosphere_tint : Color = Color.WHITE
 
+## Scene units per unit of the precomputed atmosphere's light: scales all of it (the sky, the discs,
+## the haze, the sky light on the clouds) and the directional lights on the clouds alike. Each
+## directional light lights the atmosphere on top of it by its own colour * energy (see set_lights()):
+## a light at an energy of 1 is the atmosphere's sun, one at 0.1 a tenth of its sky, glow and disc.
 @export_range(0.0, 100.0, 0.01, "or_greater") var radiance_scale : float = 1.0
 ## World Y of the planet surface.
 @export var ground_height : float = 0.0
@@ -193,6 +209,9 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 	set(value):
 		ozone = value
 		atmosphere_changed = true
+## Angular radius of every directional light's disc in the sky. A disc is as bright as its light's
+## energy (and colour) makes it, and below an energy of 1 covers the background behind it only that
+## much: a dim moon's disc lets a moon on background_texture show through it.
 @export_range(0.0001, 0.1, 0.0001, "suffix:rad") var sun_angular_radius : float = 0.0156:
 	set(value):
 		sun_angular_radius = value
@@ -337,6 +356,53 @@ const SET_INPUT_COUNT := 8 + VIEW_TEXTURES
 ## Adds reflection_parameter to Project Settings > Globals > Shader Globals (sampler2D), so
 ## materials that read it compile whenever they load.
 @export_tool_button("Add To Project Shader Globals", "Add") var add_reflection_global_action = add_reflection_parameter_to_project
+
+@export_group("Terrain Heightmap")
+## Lifts the cloud layers over terrain: where the terrain rises above a layer's floor, the layer's
+## bottom rises with it (a cloud over a mountain sits on the mountain), the lift fading out from
+## heightmap_falloff_min to heightmap_falloff_max above the terrain, so its top bumps up less or not
+## at all. Everything that samples the clouds follows it: the view, the light and shadows, the
+## skybox and add_sample(). Off (or without a heightmap) the clouds are drawn by shaders without it,
+## at the same cost. A terrain system sets it with set_heightmap(). Spherical planets: see
+## heightmap_position.
+@export var heightmap_enabled : bool = false:
+	set(value):
+		heightmap_enabled = value
+		heightmap_version += 1
+## The terrain's heights in its red channel (any filterable format: L8, R16, RF, RGBA8...; a
+## Texture2DRD of a terrain's own RenderingDevice texture works). Height = heightmap_position.y +
+## the value times heightmap_height_scale. Sampled bilinearly, one sample per cloud sample. A new
+## texture or new contents are picked up without stalls; after writing a Texture2DRD's texture on
+## the GPU, call set_heightmap() again so the skybox redraws.
+@export var heightmap : Texture2D:
+	set(value):
+		if heightmap && heightmap.changed.is_connected(_heightmap_changed):
+			heightmap.changed.disconnect(_heightmap_changed)
+		heightmap = value
+		if heightmap:
+			heightmap.changed.connect(_heightmap_changed)
+		heightmap_version += 1
+## X and Z: the world position of the heightmap's (0, 0) corner, the texture's outer edge (not its
+## first texel's centre); u runs along +X, v along +Z. Outside the rectangle the heights at its edge
+## carry on outwards (the texture is clamped, never repeated): give it a flat (or low) border where
+## the terrain ends. Y: the height of a texel value of 0, in world
+## Y like the layers' floors (not relative to ground_height). With spherical_planet heights are
+## altitudes above the planet's surface, as the layers' are, and the heightmap is laid on world X/Z:
+## fine for a terrain on the planet's top, where up is close to +Y.
+@export var heightmap_position : Vector3 = Vector3.ZERO
+## The world size (m) the whole texture covers along X and Z.
+@export var heightmap_size : Vector2 = Vector2(10000.0, 10000.0)
+## Metres of terrain height per texel value (1 for a texture holding metres).
+@export_range(0.0, 10000.0, 0.01, "or_greater", "suffix:m") var heightmap_height_scale : float = 1000.0
+## The most the terrain rises above heightmap_position.y (m); higher values are clamped to it. The
+## clouds' march bounds are widened by it so lifted clouds are found, so keep it close to the real
+## maximum. 0: heightmap_height_scale (a texture holding 0..1).
+@export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var heightmap_max_height : float = 0.0
+## Up to this height above the terrain the lift is full: a layer the terrain rises into moves up
+## with it one for one.
+@export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var heightmap_falloff_min : float = 500.0
+## From this height above the terrain there's no lift; between the two it fades out smoothly.
+@export_range(0.0, 20000.0, 1.0, "or_greater", "suffix:m") var heightmap_falloff_max : float = 2000.0
 
 @export_group("Noise Textures")
 @export_subgroup("Noise Composite")
@@ -495,6 +561,15 @@ var reflection_shaders : Array[RID] = [RID(), RID()]
 var reflection_pipelines : Array[RID] = [RID(), RID()]
 var reflection_push := PackedByteArray()
 
+# The terrain heightmap: its shaders (HEIGHTMAP_VERSIONS, loaded the first time it's on; empty
+# until then) and Heightmap buffer (created with them), the bytes last uploaded, and a count that
+# goes up whenever its settings or texture change (the skybox redraws on it).
+var heightmap_shaders : Array[RID] = []
+var heightmap_buffer : RID
+var heightmap_bytes := PackedByteArray()
+var heightmap_version := 0
+var heightmap_failed := false
+
 # Upload staging, sized in _initialize().
 var params_bytes := PackedByteArray()
 var layers_bytes := PackedByteArray()
@@ -545,16 +620,21 @@ var point_scores := PackedFloat32Array()
 var default_directional_settings := CloudDirectionalLightSettings.new()
 var default_omni_settings := CloudOmniLightSettings.new()
 var default_effector_settings := CloudEffectorSettings.new()
-# The first listed directional light's direction, which the atmosphere follows as its sun.
-var atmosphere_sun_direction := Vector3.UP
+# The lights the atmosphere is lit by: the directional lights on the clouds (towards each, and its
+# colour * energy, the atmosphere's sun at an energy of 1 being 1), written into the params every
+# frame less those below the horizon (_encode_atmosphere_lights()).
+var atmosphere_light_directions := PackedVector3Array()
+var atmosphere_light_weights := PackedVector3Array()
+# Their copies the frame renders with (render thread only, taken under lights_mutex by the first
+# viewport).
+var frame_light_directions := PackedVector3Array()
+var frame_light_weights := PackedVector3Array()
 # The last directional lights a driver gave (each one's direction, colour * energy before the
-# radiance scale and multiplier, and shadow samples) and the atmosphere's sun then, kept with the
-# effect for the fallback.
+# radiance scale and multiplier, and shadow samples), kept with the effect for the fallback.
 @export_storage var has_last_directional := false
 @export_storage var last_directional_directions := PackedVector3Array()
 @export_storage var last_directional_radiance := PackedVector3Array()
 @export_storage var last_directional_samples := PackedInt32Array()
-@export_storage var last_sun_direction := Vector3.UP
 # Whether a driver is giving the lights (calls in the last half second), whether the directional
 # lights are the fallback ones, and what those were encoded from.
 var lights_driven := false
@@ -620,6 +700,100 @@ func request_skybox() -> void:
 ## while reflections are off; the same texture while they stay on (its size follows the viewport).
 func get_reflection_texture() -> Texture2DRD:
 	return reflection_texture
+
+
+## Turns the terrain heightmap on (see heightmap_enabled) with texture covering the world X/Z
+## rectangle from position (x, z: its corner) of size, its heights position.y + value *
+## height_scale (m), at most max_height above position.y (0: height_scale). For a terrain system,
+## from the main thread, as often as it likes: a changed texture or bounds are only bound or
+## uploaded, nothing is read back or recompiled. Call it again after rewriting the texture's
+## contents on the GPU so the skybox redraws. heightmap_falloff_min/max are set on their own.
+func set_heightmap(texture : Texture2D, position : Vector3, size : Vector2, height_scale : float = 1.0, max_height : float = 0.0) -> void:
+	heightmap = texture
+	heightmap_position = position
+	heightmap_size = size
+	heightmap_height_scale = height_scale
+	heightmap_max_height = max_height
+	heightmap_enabled = true
+	heightmap_version += 1
+
+
+## Turns the terrain heightmap off and lets go of its texture.
+func clear_heightmap() -> void:
+	heightmap_enabled = false
+	heightmap = null
+
+
+func _heightmap_changed() -> void:
+	heightmap_version += 1
+
+
+## Whether the heightmap lifts the clouds: on, with a texture and a size.
+func _heightmap_on() -> bool:
+	return heightmap_enabled && heightmap != null && heightmap_size.x > 0.0 && heightmap_size.y > 0.0
+
+
+## The most the terrain rises above heightmap_position.y.
+func _heightmap_max_height() -> float:
+	return heightmap_max_height if heightmap_max_height > 0.0 else maxf(heightmap_height_scale, 0.0)
+
+
+## The highest a layer from floor_height to ceiling (world heights, cloud_scale applied) reaches
+## lifted by the heightmap, as lifted_ceiling() in SunshineClouds3Raymarch.glsl.
+func _lifted_ceiling(floor_height : float, ceiling : float) -> float:
+	var terrain_top := heightmap_position.y + _heightmap_max_height()
+	return maxf(ceiling, minf(ceiling + maxf(terrain_top - floor_height, 0.0), terrain_top + maxf(heightmap_falloff_max, heightmap_falloff_min)))
+
+
+## The heightmap's bindings in the _heightmap shader versions: its texture (bilinear, clamped) and
+## the Heightmap buffer.
+func _heightmap_uniforms(heightmap_rid : RID) -> Array[RDUniform]:
+	return [
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 34, [lut_sampler, heightmap_rid]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 35, [heightmap_buffer]),
+	]
+
+
+## The Heightmap block's bytes (HEIGHTMAP_BYTES).
+func _encode_heightmap(bytes : PackedByteArray) -> void:
+	var max_height := _heightmap_max_height()
+	var falloff_max := maxf(heightmap_falloff_max, heightmap_falloff_min)
+	bytes.encode_float(0, heightmap_position.x)
+	bytes.encode_float(4, heightmap_position.z)
+	bytes.encode_float(8, 1.0 / heightmap_size.x)
+	bytes.encode_float(12, 1.0 / heightmap_size.y)
+	bytes.encode_float(16, heightmap_position.y)
+	bytes.encode_float(20, heightmap_height_scale)
+	bytes.encode_float(24, max_height)
+	bytes.encode_float(28, heightmap_falloff_min)
+	bytes.encode_float(32, 1.0 / maxf(falloff_max - heightmap_falloff_min, 1e-3))
+	bytes.encode_float(36, heightmap_position.y + max_height)
+	bytes.encode_float(40, heightmap_position.y + max_height + falloff_max)
+	bytes.encode_float(44, 0.0)
+
+
+## The heightmap shaders and buffer, made the first time the heightmap is on (render thread). False
+## if they couldn't be (the clouds then draw without it).
+func _ensure_heightmap_resources() -> bool:
+	if !heightmap_shaders.is_empty():
+		return true
+	if heightmap_failed:
+		return false
+	var shaders : Array[RID] = []
+	for version in HEIGHTMAP_VERSIONS:
+		shaders.append(_load_shader(SHADER_PATH, version))
+	if shaders.has(RID()):
+		for s in shaders:
+			if s.is_valid():
+				rd.free_rid(s)
+		heightmap_failed = true
+		return false
+	heightmap_shaders = shaders
+	if !heightmap_buffer.is_valid():
+		heightmap_buffer = rd.uniform_buffer_create(HEIGHTMAP_BYTES)
+		# Uploaded on first use.
+		heightmap_bytes = PackedByteArray()
+	return true
 
 
 ## Adds reflection_parameter to the project's shader globals (a sampler2D without a texture; the
@@ -790,7 +964,8 @@ func _notification(what : int) -> void:
 		nearest_sampler, noise_sampler, lut_sampler, background_sampler,
 		params_buffer, layers_buffer, shadow_buffer, sky_buffer, atmosphere_buffer, point_sample_data_buffer, lights_buffer,
 		transmittance_texture, scattering_texture, irradiance_texture, shadow_texture, shadow_keys[0], shadow_keys[1],
-		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture, reflection_shaders[0], reflection_shaders[1]]
+		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture, reflection_shaders[0], reflection_shaders[1], heightmap_buffer]
+	rids.append_array(heightmap_shaders)
 	# A global this effect added goes with it (written out: its own functions can't be called here).
 	if reflection_global != &"" && reflection_global_added:
 		RenderingServer.global_shader_parameter_remove(reflection_global)
@@ -1080,8 +1255,8 @@ func _initialize() -> void:
 	atmosphere_bytes.resize(ATMOSPHERE_BYTES)
 	sample_bytes.resize(SAMPLE_BUFFER_BYTES)
 	push_bytes.resize(16)
-	density_set_inputs.resize(7)
-	skybox_set_inputs.resize(7)
+	density_set_inputs.resize(8)
+	skybox_set_inputs.resize(8)
 
 
 ## Compiles the shaders, freeing the ones they replace (their pipelines and uniform sets go with
@@ -1122,16 +1297,23 @@ func _create_shaders() -> bool:
 			rd.free_rid(s)
 	reflection_shaders = [RID(), RID()]
 	reflection_pipelines = [RID(), RID()]
+	# The heightmap shaders too.
+	for s : RID in heightmap_shaders:
+		if s.is_valid():
+			rd.free_rid(s)
+	heightmap_shaders = []
+	heightmap_failed = false
 	precompute_shaders = new_shaders.slice(9)
 	sample_shader = new_sample_shader
 
 	for pipelines : Array[RID] in [raymarch_pipelines, resolve_pipelines, shadow_pipelines, skybox_pipelines, sample_pipelines, precompute_pipelines]:
 		pipelines.clear()
-	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3 * 2) # Per layer count and interlace pass, without and with MSAA.
+	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3 * 2 * 2) # Per layer count and interlace pass, without and with MSAA, without and with the heightmap.
 	resolve_pipelines.resize(4) # Atmosphere off/on, without and with MSAA.
-	shadow_pipelines.resize(MAX_LAYERS + 1)
-	skybox_pipelines.resize(MAX_LAYERS + 1)
-	sample_pipelines.resize(MAX_LAYERS + 1)
+	# Per layer count, without and with the heightmap.
+	shadow_pipelines.resize((MAX_LAYERS + 1) * 2)
+	skybox_pipelines.resize((MAX_LAYERS + 1) * 2)
+	sample_pipelines.resize((MAX_LAYERS + 1) * 2)
 	precompute_pipelines.resize(PRECOMPUTE_VERSIONS.size())
 	return true
 
@@ -1226,8 +1408,12 @@ func set_shadow_projector(target : RID, target_size : Vector2i, blit_material : 
 ## Called by SunshineClouds3Driver every frame (main thread), with set_effectors(): the lights on the
 ## clouds, each with its settings at the same index (defaults where there are none). A light's
 ## energy on the clouds is light_energy * light_volumetric_fog_energy * its settings'
-## energy_multiplier * the effect's directional or omni energy multiplier. The first directional
-## light is the atmosphere's sun. The strongest directional light that may cast cloud shadows
+## energy_multiplier * the effect's directional or omni energy multiplier. Every directional light
+## on the clouds (the first MAX_DIRECTIONAL_LIGHTS shown with energy) also lights the atmosphere, at
+## its settings' colour * light_energy * light_volumetric_fog_energy * energy_multiplier (not the
+## directional multiplier, which is the clouds' alone): 1 is the precomputed atmosphere's own sun,
+## and radiance_scale scales both. A light a driver hid below the horizon (BELOW_HORIZON_META)
+## counts as shown. The strongest directional light that may cast cloud shadows
 ## (energy faded towards the horizon as its shadows are) casts them. A SunshineOmniLight uses its
 ## own settings, and its cloud_radius as its range. Omni lights count only where their range reaches the layers, the nearest MAX_OMNI_LIGHTS to camera_position when more do. They
 ## are encoded again only when what they depend on changes. Without a call for half a second there
@@ -1247,7 +1433,7 @@ func set_lights(directional_lights : Array[DirectionalLight3D], directional_sett
 			continue
 		var light : DirectionalLight3D = directional_lights[i]
 		var settings := directional_settings[i] if i < directional_settings.size() && directional_settings[i] else default_directional_settings
-		key.append_array([light, light.global_transform.basis, light.light_energy, light.light_volumetric_fog_energy, light.is_visible_in_tree(),
+		key.append_array([light, light.global_transform.basis, light.light_energy, light.light_volumetric_fog_energy, light_shown(light),
 			settings.color, settings.energy_multiplier, settings.cast_cloud_shadows, settings.shadow_samples])
 	for i in omni_lights.size():
 		if !is_instance_valid(omni_lights[i]):
@@ -1292,12 +1478,17 @@ func set_effectors(effectors : Array[Node3D], effector_settings : Array[CloudEff
 	lights_mutex.unlock()
 
 
-# The lowest floor and highest ceiling of the layers, times cloud_scale.
+# The lowest floor and highest ceiling of the layers, times cloud_scale (the ceilings as lifted by the
+# heightmap at most, while it's on).
 func _layers_span() -> Vector2:
 	var span := Vector2(INF, -INF)
+	var lifted := _heightmap_on()
 	for layer in active_layers:
-		span = Vector2(minf(span.x, layer.cloud_floor), maxf(span.y, layer.cloud_ceiling))
-	return span * cloud_scale
+		var ceiling := layer.cloud_ceiling * cloud_scale
+		if lifted:
+			ceiling = _lifted_ceiling(layer.cloud_floor * cloud_scale, ceiling)
+		span = Vector2(minf(span.x, layer.cloud_floor * cloud_scale), maxf(span.y, ceiling))
+	return span
 
 
 func _reaches_layers(position : Vector3, radius : float, layers_span : Vector2) -> bool:
@@ -1331,8 +1522,6 @@ func _encode_directional_lights(lights : Array[DirectionalLight3D], settings : A
 	light_id_count = 0
 	wanted_caster_id = 0
 	wanted_caster_direction = Vector3.ZERO
-	if !lights.is_empty() && is_instance_valid(lights[0]):
-		atmosphere_sun_direction = lights[0].global_transform.basis.z.normalized()
 	var any_exist := false
 	var directions := PackedVector3Array()
 	var radiances := PackedVector3Array()
@@ -1347,7 +1536,7 @@ func _encode_directional_lights(lights : Array[DirectionalLight3D], settings : A
 			continue
 		var light := lights[i]
 		var energy := light.light_energy * light.light_volumetric_fog_energy
-		if !light.is_visible_in_tree() || energy <= 0.0:
+		if !light_shown(light) || energy <= 0.0:
 			continue
 		var light_settings := settings[i] if i < settings.size() && settings[i] else default_directional_settings
 		var direction := light.global_transform.basis.z.normalized()
@@ -1374,8 +1563,21 @@ func _encode_directional_lights(lights : Array[DirectionalLight3D], settings : A
 	last_directional_directions = directions
 	last_directional_radiance = radiances
 	last_directional_samples = samples
-	last_sun_direction = atmosphere_sun_direction
+	atmosphere_light_directions = directions
+	atmosphere_light_weights = radiances
 	lights_bytes.encode_s32(0, light_id_count)
+
+
+## Whether light is shown, as is_visible_in_tree(), or would be but for a SunshineClouds3Driver having
+## hidden it below the horizon (BELOW_HORIZON_META): it still lights the clouds and the atmosphere
+## (its twilight) as it did before it was hidden.
+static func light_shown(light : DirectionalLight3D) -> bool:
+	if light.is_visible_in_tree():
+		return true
+	if !light.has_meta(BELOW_HORIZON_META):
+		return false
+	var parent := light.get_parent() as Node3D
+	return parent == null || parent.is_visible_in_tree()
 
 
 # Encodes the directional lights without a driver's: the last ones a driver gave, else the fallback
@@ -1388,12 +1590,15 @@ func _encode_fallback_lights() -> void:
 	wanted_caster_direction = Vector3.ZERO
 	var directional_radiance := _solar_irradiance() * radiance_scale * directional_energy_multiplier
 	var count := 0
+	atmosphere_light_directions = PackedVector3Array()
+	atmosphere_light_weights = PackedVector3Array()
 	if has_last_directional:
 		count = mini(mini(last_directional_directions.size(), last_directional_radiance.size()), mini(last_directional_samples.size(), MAX_DIRECTIONAL_LIGHTS))
 		for n in count:
 			_encode_vec4(lights_bytes, 16 + n * 32, last_directional_directions[n], _first_light_step(last_directional_samples[n]))
 			_encode_vec4(lights_bytes, 32 + n * 32, directional_radiance * last_directional_radiance[n], last_directional_samples[n])
-		atmosphere_sun_direction = last_sun_direction
+			atmosphere_light_directions.append(last_directional_directions[n])
+			atmosphere_light_weights.append(last_directional_radiance[n])
 	else:
 		var elevation := deg_to_rad(fallback_light_elevation)
 		var azimuth := deg_to_rad(fallback_light_azimuth)
@@ -1401,17 +1606,41 @@ func _encode_fallback_lights() -> void:
 		var color := fallback_light_color
 		var shadow_samples := default_directional_settings.shadow_samples
 		_encode_vec4(lights_bytes, 16, direction, _first_light_step(shadow_samples))
-		_encode_vec4(lights_bytes, 32, directional_radiance * Vector3(color.r, color.g, color.b) * fallback_light_energy, shadow_samples)
+		var weight := Vector3(color.r, color.g, color.b) * fallback_light_energy
+		_encode_vec4(lights_bytes, 32, directional_radiance * weight, shadow_samples)
 		count = 1
-		atmosphere_sun_direction = direction
+		atmosphere_light_directions.append(direction)
+		atmosphere_light_weights.append(weight)
 	lights_bytes.encode_s32(0, count)
 
 
 # What the fallback lights are encoded from (checked on the render thread while they're in use).
 func _fallback_key() -> Array:
 	return [radiance_scale, directional_energy_multiplier, light_step_growth, light_march_distance, cloud_scale, has_last_directional,
-		last_directional_directions, last_directional_radiance, last_directional_samples, last_sun_direction,
+		last_directional_directions, last_directional_radiance, last_directional_samples,
 		fallback_light_elevation, fallback_light_azimuth, fallback_light_color, fallback_light_energy]
+
+
+# Writes the atmosphere's lights into params_bytes (atmosphere_light_count and atmosphere_lights in
+# SunshineClouds3Common.glslinc): those of directions and weights with any light and not too far
+# below the horizon at the camera (up, ATMOSPHERE_LIGHT_MIN_MU), so the shaders' loops skip the
+# rest. Each one's disc covers what's behind it by its weight's luminance, at most 1. Returns the
+# first one's direction (up for none), whose jumps re-render the skybox at once.
+func _encode_atmosphere_lights(directions : PackedVector3Array, weights : PackedVector3Array, up : Vector3) -> Vector3:
+	var count := 0
+	var first := up
+	for i in mini(mini(directions.size(), weights.size()), MAX_DIRECTIONAL_LIGHTS):
+		var weight := weights[i]
+		if maxf(weight.x, maxf(weight.y, weight.z)) <= 0.0 || directions[i].dot(up) < ATMOSPHERE_LIGHT_MIN_MU:
+			continue
+		if count == 0:
+			first = directions[i]
+		var cover := clampf(Color(weight.x, weight.y, weight.z).get_luminance(), 0.0, 1.0)
+		_encode_vec4(params_bytes, 384 + count * 32, directions[i], cover)
+		_encode_vec4(params_bytes, 400 + count * 32, weight, 0.0)
+		count += 1
+	params_bytes.encode_s32(380, count)
+	return first
 
 
 ## Forgets the last directional lights a driver gave, so the fallback light lights the clouds until
@@ -1422,7 +1651,6 @@ func forget_last_lights() -> void:
 	last_directional_directions = PackedVector3Array()
 	last_directional_radiance = PackedVector3Array()
 	last_directional_samples = PackedInt32Array()
-	last_sun_direction = Vector3.UP
 	lights_mutex.unlock()
 
 
@@ -1597,6 +1825,12 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		background_rid = black_texture
 	if !noise_rid.is_valid() || !profile_rid.is_valid() || !coverage_rid.is_valid() || !curl_rid.is_valid():
 		return
+	# The terrain heightmap: while it's on, every pass that samples the clouds runs its _heightmap
+	# version with the texture and the Heightmap buffer bound. Off, nothing of it is touched.
+	var heightmap_rid := RID()
+	if _heightmap_on() && _ensure_heightmap_resources():
+		heightmap_rid = RenderingServer.texture_get_rd_texture(heightmap.get_rid())
+	var lifted := heightmap_rid.is_valid()
 	# Changes to layers that skipped its setter (e.g. layers.append()) are picked up on the main
 	# thread, which owns the profile texture.
 	if layers != synced_layers:
@@ -1787,6 +2021,13 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			layers_bytes.encode_float(offset + 100, layer.density * density / cloud_scale)
 		if layer_count > 0:
 			rd.buffer_update(layers_buffer, 0, layer_count * LAYER_BYTES, layers_bytes)
+		if lifted:
+			var bytes := PackedByteArray()
+			bytes.resize(HEIGHTMAP_BYTES)
+			_encode_heightmap(bytes)
+			if bytes != heightmap_bytes:
+				heightmap_bytes = bytes
+				rd.buffer_update(heightmap_buffer, 0, HEIGHTMAP_BYTES, heightmap_bytes)
 		var background_basis := Basis.from_euler(background_rotation * (PI / 180.0)).inverse()
 		var sky_key_now := [has_background, background_color, background_energy, background_fade_brightness, background_basis,
 			background_skybox_energy, skybox_ground_color, background_rid, radiance_scale, ground_height, skybox_energy, skybox_cloud_dimming, coverage,
@@ -1854,7 +2095,6 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	# The lights, and the caster the shadows should move to.
 	var wanted_id := shadow_caster_id
 	var wanted_direction := shadow_caster_direction
-	var sun_direction := atmosphere_sun_direction
 	if first_viewport:
 		lights_mutex.lock()
 		if lights_driven && Time.get_ticks_msec() - lights_set_msec > 500:
@@ -1871,7 +2111,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		elif using_fallback && _fallback_key() != fallback_key:
 			_encode_fallback_lights()
 			lights_dirty = true
-		sun_direction = atmosphere_sun_direction
+		frame_light_directions = atmosphere_light_directions
+		frame_light_weights = atmosphere_light_weights
 		if lights_dirty || atmosphere_enabled != uploaded_atmosphere_enabled:
 			lights_dirty = false
 			lights_version += 1
@@ -1899,6 +2140,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		state.raymarch_sets.resize(view_count * 2)
 		state.resolve_sets.resize(view_count * 2)
 	var parity := state.frame % 2
+	# The same for every view: they share the camera's position.
+	var sun_direction := _encode_atmosphere_lights(frame_light_directions, frame_light_weights, get_planet_up(cam_transform.origin))
 	for view in view_count:
 		var projection := scene_data.get_view_projection(view)
 		var view_projection := projection * world_to_camera
@@ -1907,7 +2150,6 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		_encode_mat4(params_bytes, 0, projection.inverse())
 		_encode_mat4(params_bytes, 64, Projection(cam_transform))
 		_encode_mat4(params_bytes, 128, state.prev_view_projections[view] if history_valid else view_projection)
-		_encode_vec4(params_bytes, 192, sun_direction, 0.0)
 		params_bytes.encode_u32(204, state.frame & 0x7FFFFFFF)
 		_encode_vec4(params_bytes, 208, cam_transform.origin - get_planet_center(), 1.0 if spherical_planet else 0.0)
 		params_bytes.encode_u32(224, size.x)
@@ -1941,7 +2183,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		params_bytes.encode_float(356, ambient_occlusion)
 		params_bytes.encode_float(360, ambient_ground_strength)
 		params_bytes.encode_float(364, ambient_extinction_scale)
-		_encode_vec4(params_bytes, 368, Vector3(ground_color.r, ground_color.g, ground_color.b), 0.0)
+		# Three floats: 380 is atmosphere_light_count (_encode_atmosphere_lights()).
+		params_bytes.encode_float(368, ground_color.r)
+		params_bytes.encode_float(372, ground_color.g)
+		params_bytes.encode_float(376, ground_color.b)
 		rd.buffer_update(params_buffer, 0, PARAMS_BYTES, params_bytes)
 
 		var color_layer := buffers.get_color_layer(view, msaa)
@@ -1959,9 +2204,12 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			density_inputs_changed = _set_input(density_set_inputs, 4, shadow_texture) || density_inputs_changed
 			density_inputs_changed = _set_input(density_set_inputs, 5, shadow_keys[0]) || density_inputs_changed
 			density_inputs_changed = _set_input(density_set_inputs, 6, shadow_keys[1]) || density_inputs_changed
+			density_inputs_changed = _set_input(density_set_inputs, 7, heightmap_rid) || density_inputs_changed
+			var density_shader := heightmap_shaders[2] if lifted else shadow_shader
+			var points_shader := heightmap_shaders[4] if lifted else sample_shader
 			if density_inputs_changed || !rd.uniform_set_is_valid(shadow_sets[0]) \
 					|| (shadow_keys[0].is_valid() && !rd.uniform_set_is_valid(shadow_blend_set)) \
-					|| (sample_shader.is_valid() && !rd.uniform_set_is_valid(sample_set)):
+					|| (points_shader.is_valid() && !rd.uniform_set_is_valid(sample_set)):
 				var density_uniforms : Array[RDUniform] = [
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, [nearest_sampler, transmittance_texture]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, [noise_sampler, noise_rid]),
@@ -1973,9 +2221,11 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 19, [shadow_buffer]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 26, [lights_buffer]),
 				]
+				if lifted:
+					density_uniforms.append_array(_heightmap_uniforms(heightmap_rid))
 				for i in 3:
 					var target := shadow_texture if i == 0 else shadow_keys[i - 1]
-					shadow_sets[i] = UniformSetCacheRD.get_cache(shadow_shader, 0, density_uniforms + [
+					shadow_sets[i] = UniformSetCacheRD.get_cache(density_shader, 0, density_uniforms + [
 						_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 21, [target]),
 					]) if target.is_valid() else RID()
 				if shadow_keys[0].is_valid():
@@ -1984,8 +2234,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 24, [shadow_keys[0]]),
 						_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 25, [shadow_keys[1]]),
 					])
-				if sample_shader.is_valid():
-					sample_set = UniformSetCacheRD.get_cache(sample_shader, 0, density_uniforms + [
+				if points_shader.is_valid():
+					sample_set = UniformSetCacheRD.get_cache(points_shader, 0, density_uniforms + [
 						_uniform(RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER, 22, [point_sample_data_buffer]),
 					])
 
@@ -2059,7 +2309,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						var march_ceiling := -INF
 						for layer in frame_layers:
 							march_floor = minf(march_floor, layer.cloud_floor * cloud_scale)
-							march_ceiling = maxf(march_ceiling, layer.cloud_ceiling * cloud_scale)
+							if lifted:
+								march_ceiling = maxf(march_ceiling, _lifted_ceiling(layer.cloud_floor * cloud_scale, layer.cloud_ceiling * cloud_scale))
+							else:
+								march_ceiling = maxf(march_ceiling, layer.cloud_ceiling * cloud_scale)
 						var thickness := maxf(march_ceiling - march_floor, 1.0) if shadows_active else 1.0
 						var extent := shadow_extent
 						_encode_mat4(shadow_bytes, 0, Projection(light_to_world))
@@ -2079,7 +2332,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					var groups := ceili(shadow_texture_resolution / 8.0)
 					if render:
 						var list := rd.compute_list_begin()
-						rd.compute_list_bind_compute_pipeline(list, _pipeline(shadow_pipelines, layer_count, shadow_shader, layer_count))
+						rd.compute_list_bind_compute_pipeline(list, _pipeline(shadow_pipelines, layer_count + (MAX_LAYERS + 1) * int(lifted), density_shader, layer_count))
 						rd.compute_list_bind_uniform_set(list, shadow_sets[1 + shadow_key if keyed else 0], 0)
 						rd.compute_list_dispatch(list, groups, groups, 1)
 						rd.compute_list_end()
@@ -2106,11 +2359,11 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 							shadow_blit_material, Color.WHITE, [shadow_source.get_rid()], 0)
 
 			if first_viewport:
-				_update_skybox(cam_transform.origin, sun_direction, background_rid, [noise_rid, profile_rid, coverage_rid, curl_rid], layer_count)
+				_update_skybox(cam_transform.origin, sun_direction, background_rid, [noise_rid, profile_rid, coverage_rid, curl_rid], layer_count, heightmap_rid)
 				rd.capture_timestamp("Render Sunshine Clouds Views")
 
 			# Up to MAX_SAMPLE_POINTS queued points (w = 0, the shader writes the density there).
-			if !positionQuerying && !positionResetting && !positionQueries.is_empty() && sample_shader.is_valid():
+			if !positionQuerying && !positionResetting && !positionQueries.is_empty() && points_shader.is_valid():
 				positionQuerying = true
 				position_query_mutex.lock()
 				positionQueriesEncoded = mini(positionQueries.size(), MAX_SAMPLE_POINTS)
@@ -2121,7 +2374,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 				rd.buffer_update(point_sample_data_buffer, 0, SAMPLE_BUFFER_BYTES, sample_bytes)
 				push_bytes.encode_s32(0, positionQueriesEncoded)
 				var list := rd.compute_list_begin()
-				rd.compute_list_bind_compute_pipeline(list, _pipeline(sample_pipelines, layer_count, sample_shader, layer_count))
+				rd.compute_list_bind_compute_pipeline(list, _pipeline(sample_pipelines, layer_count + (MAX_LAYERS + 1) * int(lifted), points_shader, layer_count))
 				rd.compute_list_bind_uniform_set(list, sample_set, 0)
 				rd.compute_list_set_push_constant(list, push_bytes, push_bytes.size())
 				rd.compute_list_dispatch(list, 1, 1, 1)
@@ -2138,9 +2391,11 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		inputs_changed = _set_input(state.set_inputs, base + 5, curl_rid) || inputs_changed
 		inputs_changed = _set_input(state.set_inputs, base + 6, shadow_texture) || inputs_changed
 		inputs_changed = _set_input(state.set_inputs, base + 7, background_rid) || inputs_changed
+		inputs_changed = _set_input(state.set_inputs, base + 8, heightmap_rid) || inputs_changed
 		for i in VIEW_TEXTURES:
 			view_textures[i] = buffers.get_texture_slice(BUFFERS_CONTEXT, VIEW_TEXTURE_NAMES[i], view, 0, 1, 1)
-			inputs_changed = _set_input(state.set_inputs, base + 8 + i, view_textures[i]) || inputs_changed
+			inputs_changed = _set_input(state.set_inputs, base + 9 + i, view_textures[i]) || inputs_changed
+		var raymarch_shader := (heightmap_shaders[int(msaa)] if lifted else (raymarch_msaa_shader if msaa else shader))
 		if inputs_changed \
 				|| !rd.uniform_set_is_valid(state.raymarch_sets[view * 2]) || !rd.uniform_set_is_valid(state.raymarch_sets[view * 2 + 1]) \
 				|| !rd.uniform_set_is_valid(state.resolve_sets[view * 2]) || !rd.uniform_set_is_valid(state.resolve_sets[view * 2 + 1]):
@@ -2156,7 +2411,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			for set_parity in 2:
 				var history := view_textures[1 - set_parity]
 				var history_b := view_textures[5 - set_parity]
-				state.raymarch_sets[view * 2 + set_parity] = UniformSetCacheRD.get_cache(raymarch_msaa_shader if msaa else shader, 0, [
+				var raymarch_uniforms : Array[RDUniform] = [
 					depth,
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, [noise_sampler, noise_rid]),
 					params_uniform,
@@ -2171,7 +2426,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 17, [nearest_sampler, history_b]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 26, [lights_buffer]),
 					_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 27, [raymarch_b_texture]),
-				])
+				]
+				if lifted:
+					raymarch_uniforms.append_array(_heightmap_uniforms(heightmap_rid))
+				state.raymarch_sets[view * 2 + set_parity] = UniformSetCacheRD.get_cache(raymarch_shader, 0, raymarch_uniforms)
 				var resolve_uniforms : Array[RDUniform] = [
 					depth,
 					params_uniform,
@@ -2201,8 +2459,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		rd.capture_timestamp("Sunshine Clouds Raymarch")
 		var list := rd.compute_list_begin()
 		var raymarch_set := state.raymarch_sets[view * 2 + parity]
-		var raymarch_shader := raymarch_msaa_shader if msaa else shader
-		var raymarch_base := (MAX_LAYERS + 1) * 3 * int(msaa) + layer_count * 3
+		var raymarch_base := (MAX_LAYERS + 1) * 3 * (int(msaa) + 2 * int(lifted)) + layer_count * 3
 		if interlace > 1 && history_valid:
 			# The texels traced this frame, then the reprojected rest (INTERLACE_PASS 1 and 2), each
 			# 4x4 tile's as a block of threads.
@@ -2298,7 +2555,10 @@ func _msaa_composite(color_msaa : RID, msaa_near : RID, msaa_far : RID) -> void:
 ## all.
 ## Rendered only while a driver asks for it (request_skybox()); its textures are kept when
 ## the driver stops asking (a paused game), as its environment may still be showing them.
-func _update_skybox(camera_position : Vector3, sun_direction : Vector3, background_rid : RID, density_rids : Array[RID], layer_count : int) -> void:
+func _update_skybox(camera_position : Vector3, sun_direction : Vector3, background_rid : RID, density_rids : Array[RID], layer_count : int,
+		heightmap_rid : RID) -> void:
+	var lifted := heightmap_rid.is_valid()
+	var sky_shader := heightmap_shaders[3] if lifted else skybox_shader
 	var enabled := skybox_enabled && atmosphere_enabled && skybox_requested_msec >= 0
 	# Once asked for, the textures stay while it's off too: a driver's Sky samples them until it lets
 	# go (a frame later, or once a paused game resumes), and a freed one breaks its material. Replaced
@@ -2341,6 +2601,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 	inputs_changed = _set_input(skybox_set_inputs, 2, background_rid) || inputs_changed
 	for i in density_rids.size():
 		inputs_changed = _set_input(skybox_set_inputs, 3 + i, density_rids[i]) || inputs_changed
+	inputs_changed = _set_input(skybox_set_inputs, 7, heightmap_rid) || inputs_changed
 	if inputs_changed || !rd.uniform_set_is_valid(skybox_sets[0]) || (use_keys && !rd.uniform_set_is_valid(skybox_blend_set)):
 		# Binding 1 is SunshineClouds3Common.glslinc's depth, which the skybox render doesn't read.
 		var uniforms : Array[RDUniform] = [
@@ -2359,9 +2620,11 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 			_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 29, [sky_buffer]),
 			_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 30, [background_sampler, background_rid]),
 		]
+		if lifted:
+			uniforms.append_array(_heightmap_uniforms(heightmap_rid))
 		for i in 3:
 			var target := skybox_texture if i == 0 else skybox_keys[i - 1]
-			skybox_sets[i] = UniformSetCacheRD.get_cache(skybox_shader, 0, uniforms + [
+			skybox_sets[i] = UniformSetCacheRD.get_cache(sky_shader, 0, uniforms + [
 				_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 31, [target]),
 			]) if target.is_valid() else RID()
 		if use_keys:
@@ -2381,6 +2644,10 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 	# Nothing it depends on changed since the last render: it stays as it is (so the editor, which
 	# only redraws on changes, can go idle).
 	var clouds_state := layers_bytes.slice(0, layer_count * LAYER_BYTES) if skybox_clouds else PackedByteArray()
+	if lifted && skybox_clouds:
+		# The heightmap's settings, texture and changes too.
+		clouds_state.append_array(heightmap_bytes)
+		clouds_state.append_array(var_to_bytes([heightmap_rid.get_id(), heightmap_version]))
 	var changed := absf(camera_height - skybox_key_camera_height) > 1.0 * cloud_scale || !sun_direction.is_equal_approx(skybox_key_sun) \
 		|| !camera_up.is_equal_approx(skybox_key_up) \
 		|| clouds_state != skybox_key_clouds || lights_version != skybox_key_lights # 1.0: camera height change (m, times cloud_scale) below which an otherwise unchanged skybox idles. 0.5-5: lower re-renders on tiny bobs, higher lets the horizon drift.
@@ -2398,7 +2665,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		skybox_blended = false
 		skybox_version += 1
 		var list := rd.compute_list_begin()
-		rd.compute_list_bind_compute_pipeline(list, _pipeline(skybox_pipelines, layer_count, skybox_shader, layer_count))
+		rd.compute_list_bind_compute_pipeline(list, _pipeline(skybox_pipelines, layer_count + (MAX_LAYERS + 1) * int(lifted), sky_shader, layer_count))
 		rd.compute_list_bind_uniform_set(list, skybox_sets[1 + skybox_key if use_keys else 0], 0)
 		rd.compute_list_dispatch(list, groups.x, groups.y, 1)
 		rd.compute_list_end()

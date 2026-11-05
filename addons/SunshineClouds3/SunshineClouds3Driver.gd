@@ -95,15 +95,25 @@ var _skybox_environment : Environment
 var _skybox_applied := []
 var _skybox_version := -1
 
+# The directional lights this driver hid below the horizon (drive_light_color: see
+# _hide_below_horizon()). Each also carries SunshineClouds3.BELOW_HORIZON_META, which the clouds read
+# and which tells a driver after a reload that it was hidden here, not by hand.
+var _hidden_lights : Array = []
+# Lights shown by hand while hidden below the horizon (instance ids): left shown until they've risen.
+var _shown_by_hand := {}
+
 
 func _exit_tree() -> void:
 	_release_shadow_projector()
 	_release_skybox()
+	_show_hidden_lights()
 
 
 func _notification(what : int) -> void:
 	if what == NOTIFICATION_EDITOR_PRE_SAVE:
 		_release_shadow_projector()
+		# Saved as the user left them; they're hidden again on the next frame.
+		_show_hidden_lights()
 	elif what == NOTIFICATION_EDITOR_POST_SAVE:
 		_update_shadow_projector()
 
@@ -269,6 +279,7 @@ func _process(delta : float) -> void:
 	_update_shadow_projector()
 	_update_skybox()
 	if !update_continuously || clouds_resource == null:
+		_show_hidden_lights()
 		return
 
 	_resolve_countdown -= 1
@@ -291,6 +302,7 @@ func _process(delta : float) -> void:
 
 	# Only changes are assigned, so the lights aren't touched every frame.
 	var light_position := camera_position if camera else Vector3(0.0, clouds_resource.ground_height, 0.0)
+	var driven : Array[DirectionalLight3D] = []
 	for i in mini(_directional_nodes.size(), directional_light_settings.size()):
 		var light := _directional_nodes[i]
 		var settings := directional_light_settings[i]
@@ -299,6 +311,12 @@ func _process(delta : float) -> void:
 			light_color.a = 1.0
 			if !light.light_color.is_equal_approx(light_color):
 				light.light_color = light_color
+			_hide_below_horizon(light, light_color.r <= 0.0 && light_color.g <= 0.0 && light_color.b <= 0.0)
+			driven.append(light)
+	# Hidden lights no longer driven (taken off the list, or drive_light_color turned off) come back.
+	for light in _hidden_lights.duplicate():
+		if !driven.has(light):
+			_show_hidden_light(light)
 
 	# Wind, as SunshineClouds2's driver: direction and scale ease towards their targets, and every
 	# layer moves each of its noises at its own speed (the detail also rises), kept within a tile
@@ -319,6 +337,46 @@ func _process(delta : float) -> void:
 		layer.curl_noise_offset = origin_offset + _wrap(layer.curl_noise_offset - prev_origin_offset + wind * layer.curl_wind_speed,
 			layer.curl_noise_scale * scale)
 	prev_origin_offset = origin_offset
+
+
+## Hides a driven light whose colour has gone black (dark: its disc has set below the horizon), so
+## the scene doesn't pay for a light that gives none (its shadow maps above all), and shows it again
+## once it's lit. Only visible is changed, and only on lights this driver hid: one hidden by hand
+## stays hidden, and one shown by hand while down stays shown until it has risen (and is hidden at
+## its next setting). The clouds and the atmosphere count a light hidden here as shown
+## (SunshineClouds3.light_shown()), so their lights, the shadow caster and the last lights kept for
+## the fallback stay as they were.
+func _hide_below_horizon(light : DirectionalLight3D, dark : bool) -> void:
+	var id := light.get_instance_id()
+	if light.has_meta(SunshineClouds3.BELOW_HORIZON_META):
+		if light.visible:
+			# Shown by hand: the user's from here on.
+			light.remove_meta(SunshineClouds3.BELOW_HORIZON_META)
+			_hidden_lights.erase(light)
+			_shown_by_hand[id] = true
+		elif !dark:
+			_show_hidden_light(light)
+		elif !_hidden_lights.has(light):
+			# Hidden here before a reload.
+			_hidden_lights.append(light)
+	elif !dark:
+		_shown_by_hand.erase(id)
+	elif light.visible && !_shown_by_hand.has(id):
+		light.set_meta(SunshineClouds3.BELOW_HORIZON_META, true)
+		light.visible = false
+		_hidden_lights.append(light)
+
+
+func _show_hidden_light(light) -> void:
+	_hidden_lights.erase(light)
+	if is_instance_valid(light) && light.has_meta(SunshineClouds3.BELOW_HORIZON_META):
+		light.remove_meta(SunshineClouds3.BELOW_HORIZON_META)
+		light.visible = true
+
+
+func _show_hidden_lights() -> void:
+	for light in _hidden_lights.duplicate():
+		_show_hidden_light(light)
 
 
 ## True the first time it's asked for flag on object (null for the engine).

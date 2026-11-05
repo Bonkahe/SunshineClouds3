@@ -28,6 +28,7 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 * Shape built from base noise, detail noise and coverage noise, plus **curl noise** that warps the cloud bases into turbulent, wind-torn bottoms.
 * **Wind** that moves each noise of each layer at its own speed, with the detail noise also rising. Direction and strength changes ease in smoothly, and wind can run in the editor, in game, or both.
 * **Effectors**: spheres that add or clear clouds in an area within each layer's own shapes. Use the `SunshineEffector` node, or attach effector settings to any `Node3D`.
+* **Terrain heightmap**: give the clouds your terrain's heightmap and the layers lift over mountains, their bases sitting on the slopes instead of cutting through them. See [Terrain heightmap](#terrain-heightmap).
 * Built-in tools to rebuild the noise composite and curl noise textures if you want your own.
 
 ### Lighting
@@ -35,7 +36,8 @@ SunshineClouds 3 is meant for projects where the sky matters and the camera can 
 * Dual Henyey-Greenstein phase functions with a multiple scattering approximation, for bright silver linings toward the sun and soft glowing interiors.
 * Density-aware ambient lighting, with sky light from above and ground bounce from below, dimmed through the cloud. Dense cores darken and thin wisps stay lit.
 * `SunshineOmniLight`: an omni light with its own cloud radius that can light **only the clouds**. Good for lightning, explosions or city glow seen from above.
-* Optional **driven sun color**: the driver tints your directional light by the atmosphere at the camera, so the whole scene warms and dims toward sunset along with the sky.
+* Optional **driven sun color**: the driver tints your directional light by the atmosphere at the camera, so the whole scene warms and dims toward sunset along with the sky. Once a driven light has fully set below the horizon, the driver hides it (and shows it again when it rises), so a sun or moon that's down costs the scene nothing, its shadows included. It still lights the twilight sky while hidden.
+* **Every directional light lights the atmosphere**, not just the sun: a moon gives the night its sky, its haze and the glow around it. Each light's share follows its energy and color, the same energy it has on the clouds. Each light also has its own disc, which dims with its energy, so a faint moon's disc lets a moon texture on the background show through.
 
 ### Atmosphere and sky
 * Precomputed atmospheric scattering (Rayleigh, Mie and ozone, multiple scattering orders), based on Eric Bruneton's model. Fully adjustable: planet radius, atmosphere height, haze, scattering heights and more.
@@ -118,6 +120,10 @@ If you'd rather wire it up yourself:
 
 A light's energy on the clouds is its `light_energy` times its `light_volumetric_fog_energy`, times the multipliers in its cloud settings and on the effect. You can tune how a light affects the clouds separately from how it lights the world.
 
+A directional light lights the atmosphere with the same energy and its cloud settings' color, but without the effect's *Directional Energy Multiplier*, which only applies to the clouds. At an energy of 1 a light is exactly the atmosphere's sun. A moon at 0.1 gives a tenth of that sky, haze, glow and disc. *Radiance Scale* still scales all of the atmosphere's light on top of that. Lights below the end of twilight (about 12° under the horizon), and lights with no energy, are skipped, so they cost nothing.
+
+Each light's disc is drawn at *Sun Angular Radius*. It's as bright as the light's energy makes it, and below an energy of 1 it also covers the background behind it only that much. The sun's disc is still thousands of times brighter than a typical background. So for a moon texture on *Background Texture* to show through the moon's disc, the moon's energy has to be low, roughly 1/2000 of the texture's brightness at *Radiance Scale* 1. Inside a light's disc, the background is dimmed by the disc instead of by the sky's brightness, so a textured moon stays visible inside its own glow.
+
 ## Scripting
 
 ### Sampling cloud density
@@ -167,6 +173,41 @@ Turn on *Reflections > Reflections Enabled* on the clouds resource, and the clou
 
 `Resources/Shaders/SunshineClouds3GlassUI.gdshader` is a `canvas_item` material for frosted and refracting glass panels: put it on a `ColorRect` over your 3D view for blur, distortion, a bevelled rim, tint and rounded corners. With `#define USE_SCREEN_COLOR` (the default) it only uses Godot's screen texture and doesn't need the clouds at all. Comment that line out to read the reflection image instead, which blurs what's behind the panel more the farther away it is (needs reflections on).
 
+## Terrain heightmap
+
+Clouds normally sit at fixed heights, so a mountain taller than a layer's floor pokes straight through it. With a heightmap of your terrain on the clouds resource (*Terrain Heightmap* group, off by default), terrain that rises into a layer lifts it: right over the ground the layer's bottom rises with the terrain one for one, so a cloud over a mountain sits on the mountain. The lift fades out smoothly between *Heightmap Falloff Min* and *Heightmap Falloff Max* above the terrain. Higher up, the clouds are as they were, so the top of a thick layer only bumps up a little, or not at all. Terrain below a layer's floor doesn't move that layer. The cloud is lifted whole, including its noise, so it keeps its shapes. Everything that reads the clouds follows the lift: the view, the clouds' own lighting and shadows, cloud shadows on the world, the skybox, and `add_sample()`.
+
+| Setting | Meaning |
+| --- | --- |
+| *Heightmap* | A `Texture2D` with the terrain heights in its red channel. Any filterable format works (`L8`, `R16`, `RF`, `RGBA8`...), and so does a `Texture2DRD` wrapping your terrain's own `RenderingDevice` texture. It's sampled bilinearly and clamped at its edges. |
+| *Heightmap Position* | X and Z: the world position of the texture's (0, 0) corner, at its outer edge (not the first texel's centre). U runs along +X and V along +Z. Y: the height of a texel value of 0, in world Y like the layers' floors. It's an absolute height, not relative to *Ground Height*. |
+| *Heightmap Size* | The world size (m) that the whole texture covers along X and Z. |
+| *Heightmap Height Scale* | Metres per texel value. Use 1 for a texture that holds metres. The terrain height is `position.y + value * height_scale`. |
+| *Heightmap Max Height* | How far above `position.y` the terrain goes at most. Higher values are clamped to it. The clouds widen their march bounds by this much so lifted clouds aren't skipped, so keep it close to the real maximum. Leave it at 0 to use *Height Scale* (for a texture holding 0 to 1). |
+| *Heightmap Falloff Min / Max* | Height above the terrain (m) where the lift is full / where it has faded to nothing. |
+
+Outside the rectangle, the heights at its edge carry on outwards: the texture is clamped, never repeated. Give it a low or flat border where your terrain ends, or the edge's mountains continue to the horizon as ridges. The heightmap's values aren't scaled by `cloud_scale`, because they are your terrain's world units.
+
+Feeding it from a terrain system, from the main thread, as often as you like:
+
+```gdscript
+# world_rect: the X/Z rectangle the whole texture covers (its outer edges), heights in metres.
+clouds.set_heightmap(terrain_height_texture, Vector3(world_rect.position.x, 0.0, world_rect.position.y),
+		world_rect.size, 1.0, terrain_max_height)
+clouds.heightmap_falloff_min = 500.0
+clouds.heightmap_falloff_max = 2000.0
+# ... and clouds.clear_heightmap() to turn it off.
+```
+
+`set_heightmap(texture, position, size, height_scale = 1.0, max_height = 0.0)` sets those properties and turns the heightmap on. Changing the texture or its bounds at run time doesn't stall: nothing is read back or recompiled. A new texture is only bound, and new bounds are a 48-byte upload. If your terrain rewrites the same texture on the GPU (a `Texture2DRD`), call `set_heightmap()` again afterwards so the skybox redraws. The view and the shadows pick the change up anyway.
+
+Tips:
+* The lift is applied per sample, so the cloud bottom follows every bump of the heightmap. A smoothed or low-resolution map (a few hundred metres per texel) gives more natural clouds than the full-detail terrain, and it's cheaper to keep up to date.
+* Between the two falloff heights the layer is squeezed vertically, by up to `1 + 1.5 * lift / (max - min)`. Keep `max - min` at least as large as the biggest lift for soft tops over mountains.
+* Spherical planets: heights are altitudes above the planet's surface, as the layers' are, and the heightmap is laid out on world X/Z. That's fine for a terrain on top of the planet, where up is close to +Y, but not for one wrapped around it.
+
+Cost: with the heightmap off (or with no texture), the clouds use exactly the shaders they used before, so it costs nothing. The heightmap's shader versions and its buffer are only created the first time it's turned on. With it on, each cloud sample costs one more texture read and a few instructions, and rays march a little further because the layers' bounds are widened by the lift. Over hills reaching well into the layer (1080p, RTX 3070), that added 0.04 to 0.3 ms at the low and medium presets and 0.3 to 2.1 ms at high and ultra (3 to 16 % of the clouds' time), most of it in the view raymarch.
+
 ## Contribution
 
 Feel free to make PRs or issues here, I'll fix them as I'm able. I'd love to see whatever you all come up with!
@@ -180,8 +221,12 @@ Thank you so much to all the wonderful people who support me.
 * Spherical planet mode:
   * Coverage noise is still sampled in flat world space, so set each layer's *Coverage Noise Strength* to 0 when using it.
   * The driven sun color isn't accurate when the sun is on the far side of the planet. Turn off *Drive Light Color* on the light's cloud settings.
+  * The terrain heightmap is laid out on world X/Z, so it only fits a terrain near the top of the planet (see [Terrain heightmap](#terrain-heightmap)).
 * Clouds in the skybox are a coarse approximation: even steps, no curl noise and no omni lights. This is fine for reflections and ambient light, not for close viewing.
-* Limits: 8 cloud layers, 4 directional lights, 8 omni lights and 16 effectors.
+* Limits: 8 cloud layers, 4 directional lights (all of them light the atmosphere too), 8 omni lights and 16 effectors.
+* Every directional light adds its own set of atmosphere lookups to the sky, haze and skybox, so a second light above the horizon costs some GPU time. A light that's below the end of twilight, or has no energy, costs nothing.
+* The driver hides a set light by turning off its *Visible*, which also hides the light's children. In the editor you'll see its visibility toggle as it sets and rises, but scenes are always saved with the light as you left it. If you turn a hidden light back on yourself, the driver leaves it on until it has risen and set again.
+* A light's disc is only drawn on the sky. A sky mesh (geometry) isn't covered by discs, but it still gets each light's haze and glow, scaled by the light's energy.
 
 ## References and credits
 

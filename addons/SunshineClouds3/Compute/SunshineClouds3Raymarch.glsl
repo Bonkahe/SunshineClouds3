@@ -7,6 +7,11 @@ shadow_blend = "#define SHADOW_BLEND";
 skybox = "#define SKYBOX";
 skybox_blend = "#define SKYBOX_BLEND";
 sample_points = "#define SAMPLE_POINTS";
+raymarch_heightmap = "#define RAYMARCH\n#define HEIGHTMAP";
+raymarch_msaa_heightmap = "#define RAYMARCH\n#define MSAA\n#define HEIGHTMAP";
+shadow_map_heightmap = "#define SHADOW_MAP\n#define HEIGHTMAP";
+skybox_heightmap = "#define SKYBOX\n#define HEIGHTMAP";
+sample_points_heightmap = "#define SAMPLE_POINTS\n#define HEIGHTMAP";
 
 #[compute]
 #version 450
@@ -15,7 +20,8 @@ VERSION_DEFINES
 
 // Everything that samples the cloud density: the view raymarch, the sun space shadow map and the
 // skybox (and the blend between two of each, when they aren't rendered every frame) and the density
-// at queued points (add_sample()).
+// at queued points (add_sample()). The _heightmap versions, used while SunshineClouds3.gd's heightmap
+// is on, lift the layers over the terrain (HEIGHTMAP); the others are compiled without any of it.
 
 #ifdef SHADOW_MAP
 #define CLOUD_SHADOWS
@@ -33,9 +39,6 @@ layout(set = 0, binding = 13) uniform sampler2D coverage_texture;
 layout(set = 0, binding = 14) uniform sampler3D curl_texture;
 
 vec2 profile_size;
-
-// Must match SunshineClouds3.gd's MAX_DIRECTIONAL_LIGHTS (at most 32, one bit each).
-#define MAX_DIRECTIONAL_LIGHTS 4
 
 // std140, 1296 bytes (SunshineClouds3.gd's lights_buffer), written by SunshineClouds3.gd at the offsets noted here.
 // Radiances are in scene units.
@@ -90,6 +93,62 @@ float effector_coverage(vec3 p) {
 	}
 	return total;
 }
+
+#ifdef HEIGHTMAP
+// The terrain heightmap (SunshineClouds3.gd's heightmap settings). Terrain rising into a layer lifts
+// it: a sample at height h over terrain at height T reads the layer at h - push, push being how far
+// T is above the layer's floor (0 where it's below) times a weight that is 1 up to falloff_min above
+// the terrain and fades (smoothstep) to 0 at falloff_max above it. The bottom of a layer over a
+// mountain sits on the mountain, its top bumps up less or not at all. The noise is read at the
+// lifted point too, so the cloud there is the unlifted cloud's, moved up.
+// std140, 48 bytes (SunshineClouds3.gd's HEIGHTMAP_BYTES), written by SunshineClouds3.gd at the offsets noted here.
+layout(set = 0, binding = 35, std140) uniform Heightmap {
+	vec2 origin; // 0, world XZ of the texture's (0, 0) corner (its outer edge)
+	vec2 inv_size; // 8, 1 / the world size it covers on X and Z
+	float base; // 16, the height (as planet_height()) of a texel value of 0
+	float height_scale; // 20, metres per texel value
+	float max_height; // 24, the most the terrain rises above base: higher values are clamped to it
+	float falloff_min; // 28
+	float inv_falloff_range; // 32, 1 / (falloff_max - falloff_min)
+	float terrain_top; // 36, base + max_height
+	float reach_top; // 40, terrain_top + falloff_max: nothing above it is lifted
+	float pad; // 44
+} heightmap;
+layout(set = 0, binding = 34) uniform sampler2D heightmap_texture;
+
+// The terrain under the last sample_density() point: x = its height (-1e30 where there's none), y =
+// the lift's weight at the point. cloud_ambient() uses it; light_transmittance() keeps the view's.
+vec2 terrain = vec2(-1e30, 0.0);
+
+// The terrain under p (at height, planet_height(p)), as terrain: none above reach_top. Outside the
+// heightmap it's the edge's (the sampler clamps to the edge texels: it doesn't repeat). One texture
+// sample.
+vec2 terrain_at(vec3 p, float height) {
+	if (height >= heightmap.reach_top) {
+		return vec2(-1e30, 0.0);
+	}
+	float terrain_height = heightmap.base
+			+ min(textureLod(heightmap_texture, (p.xz - heightmap.origin) * heightmap.inv_size, 0.0).r * heightmap.height_scale, heightmap.max_height);
+	float fade = clamp((height - terrain_height - heightmap.falloff_min) * heightmap.inv_falloff_range, 0.0, 1.0);
+	return vec2(terrain_height, 1.0 - fade * fade * (3.0 - 2.0 * fade));
+}
+
+// How far layer index is lifted at the terrain sample in terrain.
+float layer_lift(int index) {
+	return max(terrain.x - cloud_layers.layers[index].cloud_floor, 0.0) * terrain.y;
+}
+
+// The highest a lifted layer reaches: its ceiling, lifted by the most the terrain can rise above its
+// floor, but no higher than reach_top (unless it's above it already). The ray clipping uses it, so
+// lifted cloud isn't skipped.
+float lifted_ceiling(int index) {
+	float ceiling = cloud_layers.layers[index].cloud_ceiling;
+	return max(ceiling, min(ceiling + max(heightmap.terrain_top - cloud_layers.layers[index].cloud_floor, 0.0), heightmap.reach_top));
+}
+#define LAYER_CEILING(index) lifted_ceiling(index)
+#else
+#define LAYER_CEILING(index) cloud_layers.layers[index].cloud_ceiling
+#endif
 
 // Cloud density (0..1) of one layer at p (at height, planet_height(p)), inside it, with
 // added_coverage (the effectors') on its coverage. apply_curl warps p by the curl noise (view
@@ -153,6 +212,26 @@ float sample_density(vec3 p, bool apply_curl, out float dimensional_profile, out
 	coverage = 0.0;
 	float added_coverage = effector_coverage(p);
 	float height = planet_height(p);
+#ifdef HEIGHTMAP
+	terrain = terrain_at(p, height);
+	vec3 up = planet_up(p);
+	for (int i = 0; i < LAYER_COUNT; i++) {
+		float lift = layer_lift(i);
+		float lifted_height = height - lift;
+		if (lifted_height < cloud_layers.layers[i].cloud_floor || lifted_height > cloud_layers.layers[i].cloud_ceiling) {
+			continue;
+		}
+		float layer_profile;
+		float layer_height;
+		float layer_coverage;
+		float layer_density = sample_layer_density(p - up * lift, lifted_height, i, apply_curl, added_coverage, layer_profile, layer_height, layer_coverage)
+				* cloud_layers.layers[i].density;
+		total += layer_density;
+		dimensional_profile += layer_profile * layer_density;
+		height_fraction += layer_height * layer_density;
+		coverage += layer_coverage * layer_density;
+	}
+#else
 	for (int i = 0; i < LAYER_COUNT; i++) {
 		if (height < cloud_layers.layers[i].cloud_floor || height > cloud_layers.layers[i].cloud_ceiling) {
 			continue;
@@ -166,6 +245,7 @@ float sample_density(vec3 p, bool apply_curl, out float dimensional_profile, out
 		height_fraction += layer_height * layer_density;
 		coverage += layer_coverage * layer_density;
 	}
+#endif
 	if (total > 0.0) {
 		dimensional_profile /= total;
 		height_fraction /= total;
@@ -257,6 +337,9 @@ float light_transmittance(vec3 p, vec3 direction, float max_distance, float laye
 	float t = span.x;
 	float t_end = span.y;
 	uint view_effectors = effector_mask;
+#ifdef HEIGHTMAP
+	vec2 view_terrain = terrain;
+#endif
 	effector_mask = points_along(p, direction, t, t_end, lights.omni_count, lights.effector_count);
 	float optical_depth = 0.0;
 	float step_length = first_step;
@@ -268,6 +351,9 @@ float light_transmittance(vec3 p, vec3 direction, float max_distance, float laye
 		step_length *= params.light_step_growth;
 	}
 	effector_mask = view_effectors;
+#ifdef HEIGHTMAP
+	terrain = view_terrain;
+#endif
 	return exp(-optical_depth);
 }
 
@@ -279,6 +365,22 @@ vec2 cloud_ambient(vec3 p, float extinction, float dimensional_profile) {
 	vec2 ambient_scattering = vec2(pow(1.0 - dimensional_profile, 0.5), 0.0);
 	if (params.ambient_occlusion > 0.0) {
 		float height = planet_height(p);
+#ifdef HEIGHTMAP
+		// Each layer holding p lifted as sample_density() found it (terrain is p's, from that call):
+		// the distances to its top and bottom in its own lifted heights.
+		float above = 0.0;
+		float below = 0.0;
+		for (int l = 0; l < LAYER_COUNT; l++) {
+			float lifted_height = height - layer_lift(l);
+			if (lifted_height >= cloud_layers.layers[l].cloud_floor && lifted_height <= cloud_layers.layers[l].cloud_ceiling) {
+				above = max(above, cloud_layers.layers[l].cloud_ceiling - lifted_height);
+				below = max(below, lifted_height - cloud_layers.layers[l].cloud_floor);
+			}
+		}
+		float scaled = extinction * params.ambient_extinction_scale;
+		vec2 density_ambient = vec2(hemisphere_transmittance(scaled * above),
+				params.ambient_ground_strength * hemisphere_transmittance(scaled * below));
+#else
 		float top = -1e30;
 		float bottom = 1e30;
 		for (int l = 0; l < LAYER_COUNT; l++) {
@@ -290,6 +392,7 @@ vec2 cloud_ambient(vec3 p, float extinction, float dimensional_profile) {
 		float scaled = extinction * params.ambient_extinction_scale;
 		vec2 density_ambient = vec2(hemisphere_transmittance(scaled * max(top - height, 0.0)),
 				params.ambient_ground_strength * hemisphere_transmittance(scaled * max(height - bottom, 0.0)));
+#endif
 		ambient_scattering = mix(ambient_scattering, density_ambient, params.ambient_occlusion);
 	}
 	return ambient_scattering;
@@ -386,10 +489,10 @@ void main() {
 	float t_end = 0.0;
 	for (int l = 0; l < LAYER_COUNT; l++) {
 		layers_floor = min(layers_floor, cloud_layers.layers[l].cloud_floor);
-		layers_ceiling = max(layers_ceiling, cloud_layers.layers[l].cloud_ceiling);
+		layers_ceiling = max(layers_ceiling, LAYER_CEILING(l));
 		vec2 first;
 		vec2 second;
-		clip_to_layer(ray_origin, ray_direction, cloud_layers.layers[l].cloud_floor, cloud_layers.layers[l].cloud_ceiling, max_distance, first, second);
+		clip_to_layer(ray_origin, ray_direction, cloud_layers.layers[l].cloud_floor, LAYER_CEILING(l), max_distance, first, second);
 		layer_enter[l * 2] = first.x;
 		layer_exit[l * 2] = first.y;
 		layer_enter[l * 2 + 1] = second.x;
@@ -627,17 +730,23 @@ layout(set = 0, binding = 12) uniform sampler2D irradiance_texture;
 
 layout(rgba16f, set = 0, binding = 31) uniform restrict writeonly image2D skybox_image;
 
-// The planet's ground below the horizon (sky_settings.skybox_ground_albedo, lit by the sun and the sky)
-// seen from camera (atmosphere position) along view, with the air in front of it. The sky's light
-// on it and the air's are times atmosphere_tint.
+// The planet's ground below the horizon (sky_settings.skybox_ground_albedo, lit by the atmosphere's
+// lights and the sky) seen from camera (atmosphere position) along view, with the air in front of
+// it. The sky's light on it and the air's are times atmosphere_tint.
 vec3 ground_radiance(AtmosphereParameters atmosphere, vec3 camera, vec3 view) {
 	float r = length(camera);
 	float rmu = dot(camera, view);
 	float distance = -rmu - sqrt(max(rmu * rmu - r * r + atmosphere.bottom_radius * atmosphere.bottom_radius, 0.0));
 	vec3 point = camera + view * max(distance, 0.1); // Min ground distance (km): nearer, the ground's aerial perspective loses float precision. 0.05-0.5.
-	vec3 sky_irradiance;
-	vec3 sun_irradiance = GetSunAndSkyIrradiance(atmosphere, transmittance_texture, irradiance_texture,
-			point, normalize(point), params.sun_direction, sky_irradiance);
+	vec3 sky_irradiance = vec3(0.0);
+	vec3 sun_irradiance = vec3(0.0);
+	for (int i = 0; i < params.atmosphere_light_count; i++) {
+		vec3 weight = atmosphere_light_weight(i);
+		vec3 light_sky_irradiance;
+		sun_irradiance += GetSunAndSkyIrradiance(atmosphere, transmittance_texture, irradiance_texture,
+				point, normalize(point), atmosphere_light_direction(i), light_sky_irradiance) * weight;
+		sky_irradiance += light_sky_irradiance * weight;
+	}
 	vec3 transmittance;
 	vec3 glow;
 	vec3 in_scatter = sky_radiance_to_point_parts(atmosphere, camera, point, transmittance, glow);
@@ -658,7 +767,7 @@ float skybox_clouds(vec3 ray_origin, vec3 direction, float jitter, out vec3 clou
 	float layers_ceiling = -1e30;
 	for (int l = 0; l < LAYER_COUNT; l++) {
 		layers_floor = min(layers_floor, cloud_layers.layers[l].cloud_floor);
-		layers_ceiling = max(layers_ceiling, cloud_layers.layers[l].cloud_ceiling);
+		layers_ceiling = max(layers_ceiling, LAYER_CEILING(l));
 	}
 	// Both of a spherical planet's stretches as one, its even steps crossing the gap between them.
 	vec2 first;
@@ -730,9 +839,7 @@ float skybox_clouds(vec3 ray_origin, vec3 direction, float jitter, out vec3 clou
 	distance_to_cloud = weighted_distance / light_absorption;
 	// The ambient as the resolve adds it: the sky irradiance at the cloud as an average radiance.
 	vec3 point = atmosphere_position(ray_origin + direction * distance_to_cloud);
-	float r = length(point);
-	vec3 sky_light = GetIrradiance(ATMOSPHERE, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale
-			* sky_settings.atmosphere_tint;
+	vec3 sky_light = atmosphere_sky_irradiance(ATMOSPHERE, point) / PI * params.radiance_scale * sky_settings.atmosphere_tint;
 	cloud_light = (direct_light + (amb_intensity.x * params.ambient_color + amb_intensity.y * params.ground_color) * sky_light * params.ambient_energy) * sky_settings.cloud_tint;
 	return light_absorption;
 }
@@ -757,10 +864,12 @@ void main() {
 	if (dot(direction, camera) / r < mu_horizon) {
 		radiance = ground_radiance(atmosphere, camera, direction) * params.radiance_scale;
 	} else {
-		// No sun disc: the light itself gives the scene its sun highlights.
+		// No discs: the lights themselves give the scene their highlights.
 		vec3 transmittance;
-		radiance = sky_radiance(ray_origin, direction, 0.0, transmittance) * params.radiance_scale;
-		radiance += background_radiance(direction, PI / float(size.y), transmittance, radiance) * sky_settings.background_skybox_energy;
+		vec3 unused_disc;
+		float through;
+		radiance = sky_radiance(ray_origin, direction, 0.0, transmittance, unused_disc, through) * params.radiance_scale;
+		radiance += background_radiance(direction, PI / float(size.y), transmittance, radiance, through) * sky_settings.background_skybox_energy;
 	}
 	// The clouds over it, composited as the resolve does (a fixed jitter per texel: the skybox isn't
 	// accumulated, and filtering it into reflections smooths the noise).
@@ -828,6 +937,19 @@ void main() {
 	float added_coverage = effector_coverage(p);
 	float height = planet_height(p);
 	float density = 0.0;
+#ifdef HEIGHTMAP
+	terrain = terrain_at(p, height);
+	vec3 up = planet_up(p);
+	for (int i = 0; i < LAYER_COUNT; i++) {
+		float lift = layer_lift(i);
+		float lifted_height = height - lift;
+		if (lifted_height < cloud_layers.layers[i].cloud_floor || lifted_height > cloud_layers.layers[i].cloud_ceiling) {
+			continue;
+		}
+		float unused_profile, unused_height, unused_coverage;
+		density += sample_layer_density(p - up * lift, lifted_height, i, true, added_coverage, unused_profile, unused_height, unused_coverage);
+	}
+#else
 	for (int i = 0; i < LAYER_COUNT; i++) {
 		if (height < cloud_layers.layers[i].cloud_floor || height > cloud_layers.layers[i].cloud_ceiling) {
 			continue;
@@ -835,6 +957,7 @@ void main() {
 		float unused_profile, unused_height, unused_coverage;
 		density += sample_layer_density(p, height, i, true, added_coverage, unused_profile, unused_height, unused_coverage);
 	}
+#endif
 	sample_points[index].w = density;
 }
 #endif

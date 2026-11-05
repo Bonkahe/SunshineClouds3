@@ -8,13 +8,16 @@ layout(set = 0, binding = 1) uniform sampler2DMS depth_texture;
 layout(set = 0, binding = 1) uniform sampler2D depth_texture;
 #endif
 
-// std140, 384 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
+// Must match SunshineClouds3.gd's MAX_DIRECTIONAL_LIGHTS (at most 32, one bit each).
+#define MAX_DIRECTIONAL_LIGHTS 4
+
+// std140, 512 bytes, written every frame by SunshineClouds3.gd at the offsets noted here.
 layout(set = 0, binding = 3, std140) uniform Params {
 	// Per frame.
 	mat4 inv_projection; // 0
 	mat4 camera_to_world; // 64
 	mat4 prev_view_projection; // 128, world -> previous frame clip space
-	vec3 sun_direction; // 192, towards the atmosphere's sun
+	vec3 reserved_192; // 192
 	uint frame; // 204
 	vec4 planet; // 208, xyz = the camera's offset from the planet centre (m), w = 1 spherical, 0 flat
 	uvec2 screen_size; // 224
@@ -52,6 +55,12 @@ layout(set = 0, binding = 3, std140) uniform Params {
 	float ambient_ground_strength; // 360, light from below as a fraction of the sky's
 	float ambient_extinction_scale; // 364
 	vec3 ground_color; // 368, the ambient's light from below
+	// The directional lights the atmosphere is lit by (SunshineClouds3.gd's _encode_atmosphere_lights:
+	// the clouds' lights, less those with no light and those too far below the horizon to light it).
+	int atmosphere_light_count; // 380
+	// Per light: towards it (xyz), how much its disc covers what's behind it (w: its energy, at most
+	// 1); its weight (rgb: colour * energy, 1 being the atmosphere's own sun), unused (w).
+	vec4 atmosphere_lights[MAX_DIRECTIONAL_LIGHTS * 2]; // 384
 } params;
 
 // Must match SunshineClouds3.gd's MAX_LAYERS.

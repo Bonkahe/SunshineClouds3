@@ -279,9 +279,12 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 	} else if (ATMOSPHERE_ENABLED) {
 		// The sky, and the background behind it (seen across about pixel_angle radians a pixel).
 		vec3 transmittance;
-		vec3 sky = sky_radiance(ray_origin, ray_direction, 1.0 - light_absorption, transmittance) * params.radiance_scale;
+		vec3 disc;
+		float through;
+		vec3 sky = sky_radiance(ray_origin, ray_direction, 1.0 - light_absorption, transmittance, disc, through);
 		float pixel_angle = 2.0 * params.inv_projection[1][1] / float(params.screen_size.y);
-		sky += background_radiance(ray_direction, pixel_angle, transmittance, sky);
+		vec3 background = background_radiance(ray_direction, pixel_angle, transmittance, sky * params.radiance_scale, through);
+		sky = (sky + disc) * params.radiance_scale + background;
 		color = min(sky * (1.0 - light_absorption), vec3(MAX_RADIANCE));
 		background_visibility = 1.0;
 	}
@@ -292,9 +295,7 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 		vec3 sky_light = atmosphere.solar_irradiance * params.radiance_scale * vec3(0.04, 0.06, 0.1); // Plain sky radiance: without the atmosphere, the clouds' sky light as a fraction of the sun's irradiance, about a clear midday sky. Each channel 0.02-0.15, blue highest.
 		if (ATMOSPHERE_ENABLED) {
 			vec3 point = atmosphere_position(ray_origin + ray_direction * distance_to_cloud);
-			float r = length(point);
-			sky_light = GetIrradiance(atmosphere, irradiance_texture, r, dot(point, params.sun_direction) / r) / PI * params.radiance_scale
-					* sky_settings.atmosphere_tint;
+			sky_light = atmosphere_sky_irradiance(atmosphere, point) / PI * params.radiance_scale * sky_settings.atmosphere_tint;
 		}
 		// Tinted after the accumulation, so a change shows at once.
 		vec3 cloud_color = (result.yzw + (result_b.x * params.ambient_color + result_b.z * params.ground_color) * sky_light * params.ambient_energy)
