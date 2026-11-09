@@ -39,10 +39,40 @@ vec3 atmosphere_light_weight(int i) {
 	return params.atmosphere_lights[i * 2 + 1].rgb;
 }
 
+// The share of a light's glow along a view ray that its lit air gives. shadow_mask is the light's
+// shadow along the ray to the opaque scene (bit b: the air from b / 32 to (b + 1) / 32 of the way
+// there is in the scene's shadow; the resolve's glow_shadow_masks()), extent how much of that way
+// the ray goes (1, or less to a cloud in front of the scene) and transmittance the ray's: the glow
+// of nearer air counts for more, as less of it is lost on the way.
+vec3 glow_lit_fraction(uint shadow_mask, vec3 transmittance, float extent) {
+	transmittance = max(transmittance, vec3(1e-6));
+	uint lit = ~shadow_mask;
+	vec3 weighted = vec3(0.0);
+	float linear = 0.0;
+	// Each run of lit bits.
+	while (lit != 0u) {
+		int first = findLSB(lit);
+		uint unlit = ~(lit >> uint(first));
+		int end = unlit == 0u ? 32 : first + findLSB(unlit);
+		float u0 = float(first) / (32.0 * extent);
+		if (u0 >= 1.0) {
+			break;
+		}
+		float u1 = min(float(end) / (32.0 * extent), 1.0);
+		weighted += pow(transmittance, vec3(u0)) - pow(transmittance, vec3(u1));
+		linear += u1 - u0;
+		lit = end >= 32 ? 0u : lit & ~((1u << uint(end)) - 1u);
+	}
+	vec3 total = 1.0 - transmittance;
+	return mix(vec3(linear), weighted / max(total, vec3(1e-6)), greaterThan(total, vec3(1e-3)));
+}
+
 // GetSkyRadianceToPoint (shadow_length 0), returning Rayleigh and multiple scattering, with the
 // lights' single Mie scattering (the glow around each) apart, both summed over the atmosphere's
 // lights, each times its weight. The transmittance is the same for every light: worked out once.
-vec3 sky_radiance_to_point_parts(AtmosphereParameters atmosphere, vec3 camera, vec3 point, out vec3 transmittance, out vec3 glow) {
+// Each light's glow is only its lit air's, by its glow_shadow mask (glow_lit_fraction()).
+vec3 sky_radiance_to_point_parts(AtmosphereParameters atmosphere, vec3 camera, vec3 point, uvec4 glow_shadow, float glow_extent,
+		out vec3 transmittance, out vec3 glow) {
 	vec3 view_ray = normalize(point - camera);
 	float r = length(camera);
 	float rmu = dot(camera, view_ray);
@@ -77,10 +107,19 @@ vec3 sky_radiance_to_point_parts(AtmosphereParameters atmosphere, vec3 camera, v
 		single_mie_scattering = GetExtrapolatedSingleMieScattering(atmosphere, vec4(scattering, single_mie_scattering.r));
 		// Bruneton's hack against artifacts with the sun below the horizon.
 		single_mie_scattering *= smoothstep(0.0, 0.01, mu_s);
-		glow += single_mie_scattering * MiePhaseFunction(atmosphere.mie_phase_function_g, nu) * weight;
+		vec3 light_glow = single_mie_scattering * MiePhaseFunction(atmosphere.mie_phase_function_g, nu) * weight;
+		if (glow_shadow[i] != 0u) {
+			light_glow *= glow_lit_fraction(glow_shadow[i], transmittance, glow_extent);
+		}
+		glow += light_glow;
 		in_scatter += scattering * RayleighPhaseFunction(nu) * weight;
 	}
 	return in_scatter;
+}
+
+// Every light's air lit.
+vec3 sky_radiance_to_point_parts(AtmosphereParameters atmosphere, vec3 camera, vec3 point, out vec3 transmittance, out vec3 glow) {
+	return sky_radiance_to_point_parts(atmosphere, camera, point, uvec4(0u), 1.0, transmittance, glow);
 }
 
 // The sky's irradiance at point (atmosphere position, km) from every atmosphere light, each times
@@ -95,8 +134,10 @@ vec3 atmosphere_sky_irradiance(AtmosphereParameters atmosphere, vec3 point) {
 }
 
 // The light a view ray picks up through the atmosphere on its way to a world distance (m), in scene
-// units and times atmosphere_tint, and its transmittance. glow_scale scales the sun's glow in it.
-vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, out vec3 transmittance) {
+// units and times atmosphere_tint, and its transmittance. glow_scale scales the sun's glow in it;
+// glow_shadow and glow_extent leave out the glow of air in the scene's shadow (sky_radiance_to_point_parts()).
+vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, uvec4 glow_shadow, float glow_extent,
+		out vec3 transmittance) {
 	AtmosphereParameters atmosphere = ATMOSPHERE;
 	float distance_km = distance * 0.001;
 	float evaluated_km = max(distance_km, 0.1); // Min aerial perspective distance (km): nearer, it's evaluated here and scaled down, since two positions ~6360 km from the planet centre are too close for float precision. 0.05-0.5: lower risks precision noise, higher misfogs near objects.
@@ -110,7 +151,7 @@ vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float di
 	vec3 in_scatter;
 	if (abs(mu - mu_horizon) >= AERIAL_PERSPECTIVE_HORIZON_EPSILON) {
 		vec3 glow;
-		in_scatter = sky_radiance_to_point_parts(atmosphere, camera, point, transmittance, glow);
+		in_scatter = sky_radiance_to_point_parts(atmosphere, camera, point, glow_shadow, glow_extent, transmittance, glow);
 		in_scatter += glow * glow_scale;
 	} else {
 		float d = length(point - camera);
@@ -128,9 +169,9 @@ vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float di
 		vec3 glow_below;
 		vec3 glow_above;
 		vec3 in_scatter_below = sky_radiance_to_point_parts(atmosphere,
-				camera, camera + (up * mu_below + tangent * sqrt(1.0 - mu_below * mu_below)) * d, transmittance_below, glow_below);
+				camera, camera + (up * mu_below + tangent * sqrt(1.0 - mu_below * mu_below)) * d, glow_shadow, glow_extent, transmittance_below, glow_below);
 		vec3 in_scatter_above = sky_radiance_to_point_parts(atmosphere,
-				camera, camera + (up * mu_above + tangent * sqrt(1.0 - mu_above * mu_above)) * d, transmittance_above, glow_above);
+				camera, camera + (up * mu_above + tangent * sqrt(1.0 - mu_above * mu_above)) * d, glow_shadow, glow_extent, transmittance_above, glow_above);
 		float blend = clamp((mu - mu_below) / (mu_above - mu_below), 0.0, 1.0);
 		transmittance = mix(transmittance_below, transmittance_above, blend);
 		in_scatter = mix(in_scatter_below + glow_below * glow_scale, in_scatter_above + glow_above * glow_scale, blend);
@@ -138,6 +179,11 @@ vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float di
 	float fraction = distance_km / evaluated_km;
 	transmittance = pow(transmittance, vec3(fraction));
 	return in_scatter * fraction * params.radiance_scale * sky_settings.atmosphere_tint;
+}
+
+// Every light's air lit.
+vec3 atmosphere_aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, out vec3 transmittance) {
+	return atmosphere_aerial_perspective(ray_origin, ray_direction, distance, glow_scale, uvec4(0u), 1.0, transmittance);
 }
 
 // A view below the horizon lifted to just above it (cosine mu_lifted to up), keeping its angle to

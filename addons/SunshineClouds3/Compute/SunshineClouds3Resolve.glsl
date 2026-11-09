@@ -17,6 +17,9 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 // Off (SunshineClouds3.gd's atmosphere_enabled), the scene's own sky stays, nothing is fogged and
 // the clouds' sky light is a fixed plain sky radiance.
 layout(constant_id = 0) const bool ATMOSPHERE_ENABLED = true;
+// SunshineClouds3.gd's atmosphere_glow_shadows: the air in the opaque scene's shadow (in front of a
+// hill hiding the sun) gives none of the glow around the light (glow_shadow_masks()).
+layout(constant_id = 1) const bool GLOW_SHADOWS = true;
 
 #define CLOUD_SHADOWS
 #include "SunshineClouds3Common.glslinc"
@@ -53,12 +56,95 @@ layout(set = 0, binding = 20) uniform sampler2D shadow_map;
 #include "SunshineClouds3Sky.glslinc"
 
 // atmosphere_aerial_perspective(), none without the atmosphere.
-vec3 aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, out vec3 transmittance) {
+vec3 aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, float glow_scale, uvec4 glow_shadow, float glow_extent,
+		out vec3 transmittance) {
 	if (!ATMOSPHERE_ENABLED) {
 		transmittance = vec3(1.0);
 		return vec3(0.0);
 	}
-	return atmosphere_aerial_perspective(ray_origin, ray_direction, distance, glow_scale, transmittance);
+	return atmosphere_aerial_perspective(ray_origin, ray_direction, distance, glow_scale, glow_shadow, glow_extent, transmittance);
+}
+
+const int GLOW_SHADOW_SAMPLES = 10; // Depth samples per light along its line on screen (glow_shadow_masks()). 6-16: fewer leaves some glow in the shadow away from the light, more costs.
+const float GLOW_SHADOW_THICKNESS = 2.0; // How far behind a surface on screen the scene is taken to go on, times its distance. 1.5-4: lower lets glow through hills, higher has thin near things (trees, poles) shade long stretches of haze.
+
+// Which air along the pixel's view ray to the opaque scene (surface m away, 0 for none) is in the
+// scene's shadow, for each atmosphere light: bit b of its mask for the air from b / 32 to
+// (b + 1) / 32 of the way (glow_lit_fraction(), Sky). Its glow is strongly forward, so in front of
+// a hill hiding the sun the air is in the hill's shadow and gives none: no halo over the hill.
+//
+// Every light ray from the view ray lies in the plane of the view and the light, which is a line
+// on screen, from the pixel to the light. A light ray from the view ray's point at t passes a
+// direction beta from the light (and angle from the view) at t * sin(angle) / sin(beta): where the
+// scene there is nearer (and within GLOW_SHADOW_THICKNESS of it), it's behind the scene, in its
+// shadow. So each depth sample on that line shades a stretch of the view ray. The samples get
+// denser towards the light (beta geometrically from the view to half a pixel from the light),
+// where the stretch they shade is nearer the camera; the last stands for the rest of the way, so
+// a light hidden behind the scene shades the air from the camera on (the air near the camera has
+// the camera's view of it). Off screen counts as lit, so does the sky. A pixel the light is behind
+// is all in shadow. The shadow fades out between 60 and 90 degrees from the light, where its glow
+// is faint.
+uvec4 glow_shadow_masks(ivec2 pixel, float surface) {
+	uvec4 masks = uvec4(0u);
+	if (!GLOW_SHADOWS || !ATMOSPHERE_ENABLED || surface <= 0.0) {
+		return masks;
+	}
+	mat4 projection = inverse(params.inv_projection);
+	if (abs(projection[3][3]) > 0.5) {
+		return masks; // Orthographic: no line to the light.
+	}
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(params.screen_size);
+	vec4 far_view = params.inv_projection * vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+	vec3 view = normalize(far_view.xyz / far_view.w);
+	mat3 world_to_view = transpose(mat3(params.camera_to_world));
+	float min_angle = abs(params.inv_projection[1][1]) / float(params.screen_size.y); // Half a pixel (the projection may flip Y).
+	for (int i = 0; i < params.atmosphere_light_count; i++) {
+		vec3 light = normalize(world_to_view * atmosphere_light_direction(i));
+		float cos_angle = dot(view, light);
+		float strength = smoothstep(0.0, 0.5, cos_angle);
+		float angle = acos(min(cos_angle, 1.0));
+		if (strength <= 0.0) {
+			continue;
+		}
+		if (angle <= min_angle) {
+			masks[i] = ~0u;
+			continue;
+		}
+		float sin_angle = sin(angle);
+		// Fading out, the stretches shaded move out past the surface.
+		float scale = 32.0 / (sin_angle * surface * strength);
+		float step_ratio = pow(min_angle / angle, 1.0 / float(GLOW_SHADOW_SAMPLES));
+		float beta = angle * sqrt(step_ratio);
+		uint mask = 0u;
+		for (int j = 0; j < GLOW_SHADOW_SAMPLES; j++, beta *= step_ratio) {
+			vec3 direction = (sin(beta) * view + sin(angle - beta) * light) / sin_angle;
+			vec4 clip = projection * vec4(direction, 1.0);
+			if (clip.w <= 0.0) {
+				break;
+			}
+			vec2 sample_uv = clip.xy / clip.w * 0.5 + 0.5;
+			// The rest of the line is off screen too.
+			if (any(lessThan(sample_uv, vec2(0.0))) || any(greaterThanEqual(sample_uv, vec2(1.0)))) {
+				break;
+			}
+			float depth = texelFetch(depth_texture, ivec2(sample_uv * vec2(params.screen_size)), 0).r;
+			if (depth <= 0.0) {
+				continue;
+			}
+			vec4 sample_view = params.inv_projection * vec4(sample_uv * 2.0 - 1.0, depth, 1.0);
+			float first = length(sample_view.xyz / sample_view.w) * sin(beta) * scale;
+			if (first >= 31.5) {
+				continue;
+			}
+			int first_bin = j == GLOW_SHADOW_SAMPLES - 1 ? 0 : int(round(first));
+			int end_bin = int(min(round(first * GLOW_SHADOW_THICKNESS), 32.0));
+			if (end_bin > first_bin) {
+				mask |= (end_bin - first_bin >= 32 ? ~0u : (1u << uint(end_bin - first_bin)) - 1u) << uint(first_bin);
+			}
+		}
+		masks[i] = mask;
+	}
+	return masks;
 }
 
 // The raymarch texels a group's pixels gather from (those under the group and a one texel border,
@@ -266,15 +352,15 @@ float surface_sunlight(vec3 ray_origin, vec3 ray_direction, float surface) {
 }
 
 // The scene's colour at a pixel (opaque scene at surface m, 0 for none) with its clouds (result,
-// result_b) and the atmosphere over it.
-vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b) {
+// result_b) and the atmosphere over it; glow_shadow is glow_shadow_masks()'.
+vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b, uvec4 glow_shadow) {
 	float light_absorption = result.x;
 	AtmosphereParameters atmosphere = ATMOSPHERE;
 	// How much of what's behind the clouds shows through them (the sky applies its own).
 	float background_visibility = 1.0 - light_absorption;
 	if (surface > 0.0) {
 		vec3 transmittance;
-		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, surface, 1.0, transmittance);
+		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, surface, 1.0, glow_shadow, 1.0, transmittance);
 		color = color * sunlight * transmittance + in_scatter;
 	} else if (ATMOSPHERE_ENABLED) {
 		// The sky, and the background behind it (seen across about pixel_angle radians a pixel).
@@ -303,7 +389,8 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 		// The air in front of the cloud is in its shadow looking towards the sun, so its glow is
 		// blocked by the cloud's opacity too.
 		vec3 transmittance;
-		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, distance_to_cloud, 1.0 - light_absorption, transmittance);
+		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, distance_to_cloud, 1.0 - light_absorption, glow_shadow,
+				surface > 0.0 ? clamp(distance_to_cloud / surface, 1e-3, 1.0) : 1.0, transmittance);
 		color = color * background_visibility + cloud_color * transmittance + in_scatter * light_absorption;
 	}
 	return color;
@@ -313,8 +400,9 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 // composite() as colour * a + b, packed for SunshineClouds3MsaaComposite.glsl (w left to the caller).
 // It's affine in the colour: b is what it makes of black, a what white adds to that.
 uvec4 composite_affine(vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b) {
-	vec3 b = composite(vec3(0.0), ray_origin, ray_direction, surface, sunlight, result, result_b);
-	vec3 a = max(composite(vec3(1.0), ray_origin, ray_direction, surface, sunlight, result, result_b) - b, vec3(0.0));
+	uvec4 glow_shadow = glow_shadow_masks(ivec2(gl_GlobalInvocationID.xy), surface);
+	vec3 b = composite(vec3(0.0), ray_origin, ray_direction, surface, sunlight, result, result_b, glow_shadow);
+	vec3 a = max(composite(vec3(1.0), ray_origin, ray_direction, surface, sunlight, result, result_b, glow_shadow) - b, vec3(0.0));
 	b = min(b, vec3(MAX_RADIANCE));
 	return uvec4(packHalf2x16(a.rg), packHalf2x16(vec2(a.b, b.r)), packHalf2x16(b.gb), 0u);
 }
@@ -382,7 +470,7 @@ void main() {
 		return;
 	}
 	vec4 color = imageLoad(color_image, pixel);
-	color.rgb = composite(color.rgb, ray_origin, ray_direction, surface, sunlight, result, result_b);
+	color.rgb = composite(color.rgb, ray_origin, ray_direction, surface, sunlight, result, result_b, glow_shadow_masks(pixel, surface));
 	imageStore(color_image, pixel, color);
 #endif
 }

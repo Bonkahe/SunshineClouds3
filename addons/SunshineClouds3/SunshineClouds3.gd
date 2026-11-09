@@ -152,6 +152,12 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 
 @export var atmosphere_enabled : bool = true
 
+## The air in the scene's shadow gives none of the glow around a light: no halo over a hill or
+## building hiding the sun (or moon), with the air in front of it in its shadow. Worked out from the
+## depth buffer on screen, so a light off screen (or behind the camera) is shadowed only by what's
+## on screen. Costs a few depth reads a pixel per light.
+@export var atmosphere_glow_shadows : bool = true
+
 ## Multiplies the atmosphere's own light: the sky (not the sun's disc), the haze over the scene and
 ## in front of the clouds, and the sky light on the clouds and the skybox's ground.
 @export_color_no_alpha var atmosphere_tint : Color = Color.WHITE
@@ -875,7 +881,9 @@ func _release_reflection_global() -> void:
 	reflection_global_added = false
 
 
-func _create_reflection_image(size : Vector2i) -> void:
+## mid_frame: called from the render callback. Repointing the Texture2DRD then waits for the next frame, see
+## _point_reflection_texture.
+func _create_reflection_image(size : Vector2i, mid_frame := false) -> void:
 	if rd == null || reflection_texture == null:
 		return
 	if reflection_rd.is_valid():
@@ -889,7 +897,21 @@ func _create_reflection_image(size : Vector2i) -> void:
 	reflection_rd = rd.texture_create(format, RDTextureView.new())
 	rd.texture_clear(reflection_rd, Color(0.0, 0.0, 0.0, 0.0), 0, 1, 0, 1)
 	reflection_size = size
-	reflection_texture.texture_rd_rid = reflection_rd
+	if mid_frame:
+		_point_reflection_texture.call_deferred(reflection_rd)
+	else:
+		reflection_texture.texture_rd_rid = reflection_rd
+
+
+# Repointing a Texture2DRD replaces its RenderingServer texture, which frees the old shared view right away, and with
+# it the uniform set of every material sampling the reflection global. Done inside the render callback, materials
+# drawn later that frame (the transparent ocean) draw without their set: "Uniforms were never supplied for set (3)".
+# So a mid frame resize swaps here, a frame later; until then materials read the retired image, which stays valid
+# for longer than that (_retire).
+func _point_reflection_texture(texture : RID) -> void:
+	if reflection_texture == null || texture != reflection_rd || !rd.texture_is_valid(texture):
+		return # Superseded by a newer image, or reflections were turned off.
+	reflection_texture.texture_rd_rid = texture
 
 
 func _free_reflection_image() -> void:
@@ -924,7 +946,7 @@ func _write_reflection(color_layer : RID, depth_layer : RID, msaa : bool, size :
 		reflection_pipelines = [rd.compute_pipeline_create(copy_shader), rd.compute_pipeline_create(msaa_shader)]
 		reflection_push.resize(80)
 	if reflection_size != size || !rd.texture_is_valid(reflection_rd):
-		_create_reflection_image(size)
+		_create_reflection_image(size, true)
 	var version := int(msaa)
 	_encode_mat4(reflection_push, 0, inv_projection)
 	reflection_push.encode_u32(64, size.x)
@@ -1309,7 +1331,7 @@ func _create_shaders() -> bool:
 	for pipelines : Array[RID] in [raymarch_pipelines, resolve_pipelines, shadow_pipelines, skybox_pipelines, sample_pipelines, precompute_pipelines]:
 		pipelines.clear()
 	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3 * 2 * 2) # Per layer count and interlace pass, without and with MSAA, without and with the heightmap.
-	resolve_pipelines.resize(4) # Atmosphere off/on, without and with MSAA.
+	resolve_pipelines.resize(8) # Atmosphere off/on, without and with MSAA, without and with glow shadows.
 	# Per layer count, without and with the heightmap.
 	shadow_pipelines.resize((MAX_LAYERS + 1) * 2)
 	skybox_pipelines.resize((MAX_LAYERS + 1) * 2)
@@ -2479,8 +2501,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 
 		rd.capture_timestamp("Sunshine Clouds Resolve")
 		list = rd.compute_list_begin()
-		rd.compute_list_bind_compute_pipeline(list, _pipeline(resolve_pipelines, int(atmosphere_enabled) + 2 * int(msaa),
-			resolve_msaa_shader if msaa else resolve_shader, atmosphere_enabled))
+		rd.compute_list_bind_compute_pipeline(list, _pipeline(resolve_pipelines, int(atmosphere_enabled) + 2 * int(msaa) + 4 * int(atmosphere_glow_shadows),
+			resolve_msaa_shader if msaa else resolve_shader, atmosphere_enabled, atmosphere_glow_shadows))
 		rd.compute_list_bind_uniform_set(list, state.resolve_sets[view * 2 + parity], 0)
 		rd.compute_list_dispatch(list, ceili(size.x / 8.0), ceili(size.y / 8.0), 1)
 		rd.compute_list_end()
