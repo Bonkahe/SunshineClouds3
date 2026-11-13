@@ -328,11 +328,14 @@ void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin
 
 // Screen space cloud shadows, when the light can't take them as a projector: opaque surfaces
 // are darkened (ambient included) by the sunlight the clouds leave them, fading out towards the
-// edge of the map.
+// edge of the map, and in from the camera (screen_space_shadow_near_fade).
 float surface_sunlight(vec3 ray_origin, vec3 ray_direction, float surface) {
 	float sunlight = 1.0;
 	if (shadow.screen_space != 0 && shadow.march_length > 0.0 && surface > 0.0 && surface < params.max_distance) {
 		float fade = 1.0 - smoothstep(shadow.fade_start, shadow.extent * 0.5, surface);
+		if (shadow.near_fade_end > 0.0) {
+			fade *= smoothstep(0.0, shadow.near_fade_end, surface);
+		}
 		if (fade > 0.0) {
 			// The optical depth still ahead, interpolated between the map's three levels (zero at
 			// the end of the march).

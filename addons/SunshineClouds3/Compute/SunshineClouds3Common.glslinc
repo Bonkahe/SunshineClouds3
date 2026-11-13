@@ -109,6 +109,7 @@ layout(set = 0, binding = 19, std140) uniform Shadow {
 	int screen_space; // 168
 	float screen_space_strength; // 172
 	float fade_start; // 176
+	float near_fade_end; // 180, screen space shadows fade in from the camera to here (0: no fade)
 	vec3 reserved; // 192
 } shadow;
 #endif

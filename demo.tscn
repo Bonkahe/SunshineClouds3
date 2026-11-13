@@ -10,6 +10,7 @@
 [ext_resource type="Script" uid="uid://cnh5toiuralja" path="res://addons/SunshineClouds3/Resources/CloudLayer.gd" id="8_y4qkf"]
 [ext_resource type="ImageTexture3D" uid="uid://c8p758oj63aqx" path="res://addons/SunshineClouds3/Compute/NoiseTextures/NoiseComposite.res" id="9_oncxo"]
 [ext_resource type="Script" uid="uid://c7hwen2bl73wi" path="res://addons/SunshineClouds3/SunshineClouds3.gd" id="10_hu8bq"]
+[ext_resource type="Script" uid="uid://bmb76odwqyfuv" path="res://addons/SunshineClouds3/SunshineClouds3SSRDepth.gd" id="11_jbdfk"]
 [ext_resource type="Script" uid="uid://ciwtkox7cf2er" path="res://addons/SunshineClouds3/SunshineClouds3Driver.gd" id="11_l07pr"]
 [ext_resource type="Script" uid="uid://cg2nybl8tbgrp" path="res://addons/SunshineClouds3/Resources/CloudDirectionalLightSettings.gd" id="12_vtas4"]
 [ext_resource type="Script" uid="uid://djgbllsd1m6ar" path="res://addons/SunshineClouds3/Resources/CloudEffectorSettings.gd" id="13_36gju"]
@@ -25,6 +26,7 @@ sky_material = SubResource("ProceduralSkyMaterial_bej8n")
 [sub_resource type="Environment" id="Environment_ob8ie"]
 background_mode = 2
 sky = SubResource("Sky_npcgs")
+ssr_enabled = true
 glow_enabled = true
 fog_density = 0.001
 
@@ -57,20 +59,51 @@ needs_motion_vectors = false
 needs_normal_roughness = false
 script = ExtResource("10_hu8bq")
 layers = Array[ExtResource("8_y4qkf")]([SubResource("Resource_jbdfk")])
-skybox_resolution = 256
-skybox_radiance_size = 3
-skybox_cloud_steps = 32
-skybox_cloud_light_steps = 8
+cloud_shadow_strength = 0.873
+cloud_shadow_sharpness = 1.51
+screen_space_shadow_strength = 1.0
+screen_space_shadow_near_fade = 0.037
+skybox_resolution = 128
+skybox_radiance_size = 2
+skybox_below_camera = true
+skybox_below_distance = 10000.0
+skybox_cloud_steps = 64
+skybox_cloud_light_steps = 4
 skybox_cloud_distance = 30000.0
 reflections_enabled = true
+engine_ssr_clouds = true
 has_last_directional = true
 last_directional_directions = PackedVector3Array(0.7117084, 0.5371706, -0.4526798)
 last_directional_radiance = PackedVector3Array(1, 1, 1)
 last_directional_samples = PackedInt32Array(4)
-last_sun_direction = Vector3(0.7117084, 0.5371706, -0.4526798)
+
+[sub_resource type="CompositorEffect" id="CompositorEffect_5g7v7"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 0
+access_resolved_color = false
+access_resolved_depth = true
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("11_jbdfk")
+clouds = SubResource("CompositorEffect_4gl14")
+
+[sub_resource type="CompositorEffect" id="CompositorEffect_i1g04"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 1
+access_resolved_color = false
+access_resolved_depth = true
+needs_motion_vectors = false
+needs_normal_roughness = false
+script = ExtResource("11_jbdfk")
+clouds = SubResource("CompositorEffect_4gl14")
+restore = true
 
 [sub_resource type="Compositor" id="Compositor_5g7v7"]
-compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4gl14")])
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4gl14"), SubResource("CompositorEffect_5g7v7"), SubResource("CompositorEffect_i1g04")])
 
 [sub_resource type="Resource" id="Resource_i1g04"]
 script = ExtResource("12_vtas4")
@@ -83,6 +116,10 @@ top_radius = 100.0
 bottom_radius = 100.0
 height = 5000.0
 
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_vasyl"]
+albedo_color = Color(0, 0, 0, 1)
+roughness = 0.0
+
 [sub_resource type="PlaneMesh" id="PlaneMesh_y6i4o"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_0qyqa"]
@@ -92,11 +129,14 @@ shader_parameter/albedo = Color(0.02, 0.03, 0.035, 1)
 shader_parameter/roughness = 0.05200000247
 shader_parameter/fresnel_f0 = 0.02
 shader_parameter/reflection_strength = 1.0
-shader_parameter/march_distance = 10000.0
 shader_parameter/march_steps = 4
 shader_parameter/refine_steps = 6
 shader_parameter/thickness = 1.0
+shader_parameter/thickness_scale = 0.1
+shader_parameter/far_distance = 500.0
+shader_parameter/hole_fill_distance = 0.1
 shader_parameter/screen_edge_fade = 0.170000008075
+shader_parameter/side_fade_horizon_scale = 2.0
 
 [node name="DemoScene" type="Node3D" unique_id=1070852390]
 
@@ -135,5 +175,6 @@ mesh = SubResource("CylinderMesh_svejp")
 
 [node name="CSGSphere3D" type="MeshInstance3D" parent="." unique_id=1753401533]
 transform = Transform3D(9939.2295, 0, 0, 0, 9939.2295, 0, 0, 0, 9939.2295, -1050.9292, 0, 3140.4036)
+material_override = SubResource("StandardMaterial3D_vasyl")
 mesh = SubResource("PlaneMesh_y6i4o")
 surface_material_override/0 = SubResource("ShaderMaterial_0qyqa")

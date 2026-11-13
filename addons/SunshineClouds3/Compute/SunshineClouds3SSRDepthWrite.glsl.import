@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://dbo3sx4buvclq"
+path="res://.godot/imported/SunshineClouds3SSRDepthWrite.glsl-644bd2aaa45a2f6b65e7d44028434124.res"
+
+[deps]
+
+source_file="res://addons/SunshineClouds3/Compute/SunshineClouds3SSRDepthWrite.glsl"
+dest_files=["res://.godot/imported/SunshineClouds3SSRDepthWrite.glsl-644bd2aaa45a2f6b65e7d44028434124.res"]
+
+[params]
+

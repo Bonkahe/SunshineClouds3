@@ -13,7 +13,10 @@ const RESOLVE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineCloud
 const ATMOSPHERE_PRECOMPUTE_PATH := "res://addons/SunshineClouds3/Compute/atmosphere/AtmospherePrecompute.glsl"
 const MSAA_COMPOSITE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3MsaaComposite.glsl"
 const REFLECTION_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3Reflection.glsl"
-const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMPUTE_PATH, MSAA_COMPOSITE_SHADER_PATH, REFLECTION_SHADER_PATH]
+const SSR_DEPTH_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3SSRDepth.glsl"
+const SSR_DEPTH_WRITE_SHADER_PATH := "res://addons/SunshineClouds3/Compute/SunshineClouds3SSRDepthWrite.glsl"
+const DRAW_SHADER_PATHS := [SHADER_PATH, RESOLVE_SHADER_PATH, ATMOSPHERE_PRECOMPUTE_PATH, MSAA_COMPOSITE_SHADER_PATH, REFLECTION_SHADER_PATH,
+	SSR_DEPTH_SHADER_PATH, SSR_DEPTH_WRITE_SHADER_PATH]
 
 ## I wouldn't change this, as 32 sample points per frame should be enough, and it buffers so if you go over that one frame and under it the other the ones missed will roll over.
 const MAX_SAMPLE_POINTS := 32
@@ -293,6 +296,12 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 @export_range(0.0, 1.0, 0.01) var cloud_shadow_edge_fade : float = 0.7
 @export_subgroup("Screen Space")
 @export_range(0.0, 1.0, 0.01) var screen_space_shadow_strength : float = 0.6
+## Keeps the screen space shadows off things near the camera: they fade in (smoothstep) from none at
+## the camera to full strength at this fraction of their view distance, half cloud_shadow_extent
+## (where cloud_shadow_edge_fade has faded them out). 0 = no near fade. 0.2 at the default 80 km
+## extent: full strength from 8 km out. Doesn't affect Light Projector shadows (Godot's own light
+## shadowing).
+@export_range(0.0, 1.0, 0.001) var screen_space_shadow_near_fade : float = 0.0
 
 @export_group("Background")
 ## An equirectangular panorama behind the atmosphere (laid out as PanoramaSkyMaterial's): stars and
@@ -337,6 +346,14 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## ambient light): its radiance is scaled by 1 - this * (coverage + density) / 2, from Base
 ## Settings. 0 = not at all.
 @export_range(0.0, 1.0, 0.01) var skybox_cloud_dimming : float = 0.0
+## Renders the skybox from skybox_below_distance under the camera instead of at it: the sky and
+## clouds as seen from lower down, as a reflection in water below the camera shows them (the
+## mirror image of the camera is under the water). Off: from the camera.
+@export var skybox_below_camera : bool = false
+## How far under the camera (m, times cloud_scale) the skybox is rendered from with
+## skybox_below_camera. Kept at least a metre above the ground (ground_height, or the planet's
+## surface with spherical_planet).
+@export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var skybox_below_distance : float = 100.0
 @export_subgroup("Clouds")
 ## Marches the clouds into the skybox too, far coarser than on screen: even steps, no curl noise and
 ## no omni lights. Off leaves the clear sky.
@@ -365,6 +382,18 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## Adds reflection_parameter to Project Settings > Globals > Shader Globals (sampler2D), so
 ## materials that read it compile whenever they load.
 @export_tool_button("Add To Project Shader Globals", "Add") var add_reflection_global_action = add_reflection_parameter_to_project
+## Puts the clouds into Godot's own screen-space reflections (the Environment's SSR, Forward+), at
+## their depth: Godot's SSR takes sky as nothing to reflect, so on its own it never shows them. The
+## clouds' depth (last frame's, as the colour Godot's SSR reflects) is written into the depth
+## buffer where it shows sky before Godot's SSR runs, and taken out again after the opaque pass.
+## Needs the pair of effects get_ssr_depth_effects() makes in the same Compositor: a
+## SunshineClouds3Driver adds and removes them with this. Only worth it with the Environment's SSR
+## on; SSAO, SSIL and contact shadows see the clouds' depth too while it's in. Godot's SSR passes
+## over rays that step into a pixel more than its ssr_depth_tolerance (m) behind it, which clouds
+## seen from below mostly are: they're reflected in bands unless that's raised (tens to hundreds of
+## metres; it makes nearby objects count as that thick too). Its ssr_fade_out fades long
+## reflections such as the clouds' (0 = none).
+@export var engine_ssr_clouds : bool = false
 
 @export_group("Terrain Heightmap")
 ## Lifts the cloud layers over terrain: where the terrain rises above a layer's floor, the layer's
@@ -551,6 +580,9 @@ var skybox_key_lights := 0
 var skybox_sets : Array[RID] = [RID(), RID(), RID()]
 var skybox_blend_set : RID
 var skybox_set_inputs := PackedInt64Array()
+# skybox_below_camera: the skybox's own copy of the Params buffer, with the camera moved down
+# (created the first time it's on).
+var skybox_params_buffer : RID
 # What SkySettings was last written from.
 var sky_settings_key := []
 # Whether the blend has reached the latest key, and a count of the skybox's changes
@@ -570,6 +602,15 @@ var reflection_owner := 0
 var reflection_shaders : Array[RID] = [RID(), RID()]
 var reflection_pipelines : Array[RID] = [RID(), RID()]
 var reflection_push := PackedByteArray()
+
+# engine_ssr_clouds: SunshineClouds3SSRDepth.glsl's versions (inject, inject_storage,
+# restore_storage) and SunshineClouds3SSRDepthWrite.glsl, loaded the first time it's used (empty
+# until then), their compute pipelines, and the write's render pipeline per framebuffer format.
+var ssr_depth_shaders : Array[RID] = []
+var ssr_depth_pipelines : Array[RID] = []
+var ssr_depth_render_pipelines := {}
+var ssr_depth_failed := false
+var ssr_depth_push := PackedByteArray()
 
 # The terrain heightmap: its shaders (HEIGHTMAP_VERSIONS, loaded the first time it's on; empty
 # until then) and Heightmap buffer (created with them), the bytes last uploaded, and a count that
@@ -696,6 +737,10 @@ class ViewportState:
 	# pick the viewport writing the reflection image.
 	var reflection_pixels := 0
 	var reflection_frame := -1
+	# engine_ssr_clouds: whether the clouds' depth went into the depth buffer this frame (taken out
+	# after the opaque pass), and whether straight into it (storage) or through the raster write.
+	var ssr_depth_injected := false
+	var ssr_depth_storage := false
 
 
 ## Queues a cloud density sample at position (world space): callable is called with
@@ -713,6 +758,18 @@ func add_sample(callable : Callable, position : Vector3):
 ## WorldEnvironment: it's rendered only while asked for.
 func request_skybox() -> void:
 	skybox_requested_msec = Time.get_ticks_msec()
+
+
+## The pair of SunshineClouds3SSRDepth effects engine_ssr_clouds needs in the Compositor with this
+## one (new ones each call). A SunshineClouds3Driver adds and removes them itself.
+func get_ssr_depth_effects() -> Array[CompositorEffect]:
+	var effects : Array[CompositorEffect] = []
+	for restore : bool in [false, true]:
+		var effect := SunshineClouds3SSRDepth.new()
+		effect.clouds = self
+		effect.restore = restore
+		effects.append(effect)
+	return effects
 
 
 ## The reflection image (see reflections_enabled) as a texture: also the global shader
@@ -947,7 +1004,10 @@ func _is_reflection_owner(buffers : RenderSceneBuffersRD, state : ViewportState,
 	return id == reflection_owner
 
 
-func _write_reflection(color_layer : RID, depth_layer : RID, msaa : bool, size : Vector2i, inv_projection : Projection) -> void:
+## accumulation, accumulation_b: the resolve's this frame (its clouds' absorption and distance, which place them in
+## the image's distances).
+func _write_reflection(color_layer : RID, depth_layer : RID, accumulation : RID, accumulation_b : RID, msaa : bool, size : Vector2i,
+		inv_projection : Projection) -> void:
 	if !reflection_shaders[0].is_valid():
 		var copy_shader := _load_shader(REFLECTION_SHADER_PATH, &"copy")
 		var msaa_shader := _load_shader(REFLECTION_SHADER_PATH, &"msaa")
@@ -970,6 +1030,8 @@ func _write_reflection(color_layer : RID, depth_layer : RID, msaa : bool, size :
 		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, [nearest_sampler, color_layer]),
 		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, [nearest_sampler, depth_layer]),
 		_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 2, [reflection_rd]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, [nearest_sampler, accumulation]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, [nearest_sampler, accumulation_b]),
 	])
 	var list := rd.compute_list_begin()
 	rd.compute_list_bind_compute_pipeline(list, reflection_pipelines[version])
@@ -977,6 +1039,147 @@ func _write_reflection(color_layer : RID, depth_layer : RID, msaa : bool, size :
 	rd.compute_list_set_push_constant(list, reflection_push, reflection_push.size())
 	rd.compute_list_dispatch(list, ceili(size.x / 8.0), ceili(size.y / 8.0), 1)
 	rd.compute_list_end()
+
+
+## engine_ssr_clouds, from the SunshineClouds3SSRDepth pair (render thread): restore false writes
+## the clouds' depth (last frame's resolve accumulation, where each pixel's direction was then)
+## into the depth buffer where it shows sky, before Godot's SSR builds its Hi-Z from it; restore
+## true puts those pixels back to sky after the opaque pass, before the sky is drawn. Without 3D
+## MSAA the depth buffer is a depth-stencil attachment: a mask, then a raster write
+## (SunshineClouds3SSRDepthWrite.glsl). With it, Godot's SSR reads the resolved depth, an R32F
+## storage texture (Forward+), written directly.
+func _ssr_depth_callback(restore : bool, render_data : RenderData) -> void:
+	if rd == null:
+		return
+	var buffers := render_data.get_render_scene_buffers() as RenderSceneBuffersRD
+	var scene_data := render_data.get_render_scene_data()
+	if buffers == null || scene_data == null:
+		return
+	var state : ViewportState = viewport_states.get(buffers.get_instance_id())
+	if state == null:
+		return
+	var view_count := buffers.get_view_count()
+	var size := buffers.get_internal_size()
+	if restore:
+		if state.ssr_depth_injected && buffers.has_texture(BUFFERS_CONTEXT, &"ssr_depth_mask"):
+			rd.capture_timestamp("Sunshine Clouds SSR Depth Restore")
+			for view in view_count:
+				var restore_mask := buffers.get_texture_slice(BUFFERS_CONTEXT, &"ssr_depth_mask", view, 0, 1, 1)
+				_ssr_depth_pass(2 if state.ssr_depth_storage else -1, buffers.get_depth_layer(view, false), restore_mask, RID(), RID(), size)
+		state.ssr_depth_injected = false
+		return
+	state.ssr_depth_injected = false
+	# Last frame's accumulation: the main callback hasn't run yet this frame.
+	if size.x == 0 || size.y == 0 || state.prev_view_projections.size() < view_count || !buffers.has_texture(BUFFERS_CONTEXT, &"raymarch") \
+			|| !_load_ssr_depth_shaders():
+		return
+	if !buffers.has_texture(BUFFERS_CONTEXT, &"ssr_depth_mask"):
+		buffers.create_texture(BUFFERS_CONTEXT, &"ssr_depth_mask", RenderingDevice.DATA_FORMAT_R32_SFLOAT,
+			RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT,
+			RenderingDevice.TEXTURE_SAMPLES_1, size, view_count, 1, true, false)
+	var parity := state.frame % 2
+	var cam_transform := Projection(scene_data.get_cam_transform())
+	rd.capture_timestamp("Sunshine Clouds SSR Depth")
+	for view in view_count:
+		var projection := scene_data.get_view_projection(view)
+		if projection.is_orthogonal():
+			return
+		var depth := buffers.get_depth_layer(view, false)
+		var format := rd.texture_get_format(depth)
+		var storage := format.format == RenderingDevice.DATA_FORMAT_R32_SFLOAT && (format.usage_bits & RenderingDevice.TEXTURE_USAGE_STORAGE_BIT) != 0
+		if !storage && (format.usage_bits & RenderingDevice.TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0:
+			return
+		state.ssr_depth_storage = storage
+		ssr_depth_push.resize(112)
+		_encode_mat4(ssr_depth_push, 0, state.prev_view_projections[view] * cam_transform)
+		ssr_depth_push.encode_float(64, projection.x.x)
+		ssr_depth_push.encode_float(68, projection.y.y)
+		ssr_depth_push.encode_float(72, projection.z.x)
+		ssr_depth_push.encode_float(76, projection.z.y)
+		ssr_depth_push.encode_float(80, projection.z.z)
+		ssr_depth_push.encode_float(84, projection.w.z)
+		ssr_depth_push.encode_u32(88, size.x)
+		ssr_depth_push.encode_u32(92, size.y)
+		ssr_depth_push.encode_float(96, max_distance * cloud_scale)
+		var mask := buffers.get_texture_slice(BUFFERS_CONTEXT, &"ssr_depth_mask", view, 0, 1, 1)
+		var accumulation := buffers.get_texture_slice(BUFFERS_CONTEXT, VIEW_TEXTURE_NAMES[parity], view, 0, 1, 1)
+		var accumulation_b := buffers.get_texture_slice(BUFFERS_CONTEXT, VIEW_TEXTURE_NAMES[4 + parity], view, 0, 1, 1)
+		_ssr_depth_pass(1 if storage else 0, depth, mask, accumulation, accumulation_b, size)
+		if !storage:
+			_ssr_depth_pass(-2, depth, mask, RID(), RID(), size)
+		state.ssr_depth_injected = true
+
+
+## version: SunshineClouds3SSRDepth.glsl's (0 inject, 1 inject_storage, 2 restore_storage; the
+## injects with ssr_depth_push set), or the raster write: -2 the mask's depth, -1 back to sky.
+func _ssr_depth_pass(version : int, depth : RID, mask : RID, accumulation : RID, accumulation_b : RID, size : Vector2i) -> void:
+	if version < 0:
+		var framebuffer := FramebufferCacheRD.get_cache_multipass([depth], [], 1)
+		var framebuffer_format := rd.framebuffer_get_format(framebuffer)
+		var pipeline : RID = ssr_depth_render_pipelines.get(framebuffer_format, RID())
+		if !pipeline.is_valid():
+			var depth_state := RDPipelineDepthStencilState.new()
+			depth_state.enable_depth_test = true
+			depth_state.enable_depth_write = true
+			depth_state.depth_compare_operator = RenderingDevice.COMPARE_OP_ALWAYS
+			pipeline = rd.render_pipeline_create(ssr_depth_shaders[3], framebuffer_format, RenderingDevice.INVALID_FORMAT_ID,
+				RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), depth_state,
+				RDPipelineColorBlendState.new())
+			ssr_depth_render_pipelines[framebuffer_format] = pipeline
+		var push := PackedByteArray()
+		push.resize(16)
+		push.encode_s32(0, 1 if version == -1 else 0)
+		var draw_list := rd.draw_list_begin(framebuffer)
+		rd.draw_list_bind_render_pipeline(draw_list, pipeline)
+		rd.draw_list_bind_uniform_set(draw_list, UniformSetCacheRD.get_cache(ssr_depth_shaders[3], 0, [
+			_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, [nearest_sampler, mask])]), 0)
+		rd.draw_list_set_push_constant(draw_list, push, push.size())
+		rd.draw_list_draw(draw_list, false, 1, 3)
+		rd.draw_list_end()
+		return
+	var uniforms : Array[RDUniform] = [
+		_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 0, [depth]) if version > 0 else _uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, [nearest_sampler, depth]),
+		_uniform(RenderingDevice.UNIFORM_TYPE_IMAGE, 1, [mask]),
+	]
+	if version < 2:
+		uniforms.append(_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, [nearest_sampler, accumulation]))
+		uniforms.append(_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, [nearest_sampler, accumulation_b]))
+	else:
+		ssr_depth_push.resize(112)
+		ssr_depth_push.encode_u32(88, size.x)
+		ssr_depth_push.encode_u32(92, size.y)
+	var list := rd.compute_list_begin()
+	rd.compute_list_bind_compute_pipeline(list, ssr_depth_pipelines[version])
+	rd.compute_list_bind_uniform_set(list, UniformSetCacheRD.get_cache(ssr_depth_shaders[version], 0, uniforms), 0)
+	rd.compute_list_set_push_constant(list, ssr_depth_push, ssr_depth_push.size())
+	rd.compute_list_dispatch(list, ceili(size.x / 8.0), ceili(size.y / 8.0), 1)
+	rd.compute_list_end()
+
+
+## The engine_ssr_clouds shaders, loaded the first time they're needed. False (once, with the
+## errors) if one doesn't compile.
+func _load_ssr_depth_shaders() -> bool:
+	if !ssr_depth_shaders.is_empty():
+		return true
+	if ssr_depth_failed:
+		return false
+	var loaded : Array[RID] = []
+	for version : StringName in [&"inject", &"inject_storage", &"restore_storage"]:
+		loaded.append(_load_shader(SSR_DEPTH_SHADER_PATH, version))
+	loaded.append(_load_shader(SSR_DEPTH_WRITE_SHADER_PATH))
+	for loaded_shader in loaded:
+		if !loaded_shader.is_valid():
+			for other in loaded:
+				if other.is_valid():
+					rd.free_rid(other)
+			ssr_depth_failed = true
+			return false
+	ssr_depth_shaders = loaded
+	ssr_depth_pipelines = []
+	for i in 3:
+		ssr_depth_pipelines.append(rd.compute_pipeline_create(loaded[i]))
+	ssr_depth_render_pipelines.clear()
+	return true
 
 
 func _init() -> void:
@@ -1000,8 +1203,10 @@ func _notification(what : int) -> void:
 		nearest_sampler, noise_sampler, lut_sampler, background_sampler,
 		params_buffer, layers_buffer, shadow_buffer, sky_buffer, atmosphere_buffer, point_sample_data_buffer, lights_buffer,
 		transmittance_texture, scattering_texture, irradiance_texture, shadow_texture, shadow_keys[0], shadow_keys[1],
-		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture, reflection_shaders[0], reflection_shaders[1], heightmap_buffer]
+		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture, reflection_shaders[0], reflection_shaders[1], heightmap_buffer,
+		skybox_params_buffer]
 	rids.append_array(heightmap_shaders)
+	rids.append_array(ssr_depth_shaders)
 	# A global this effect added goes with it (written out: its own functions can't be called here).
 	if reflection_global != &"" && reflection_global_added:
 		RenderingServer.global_shader_parameter_remove(reflection_global)
@@ -1292,7 +1497,7 @@ func _initialize() -> void:
 	sample_bytes.resize(SAMPLE_BUFFER_BYTES)
 	push_bytes.resize(16)
 	density_set_inputs.resize(8)
-	skybox_set_inputs.resize(8)
+	skybox_set_inputs.resize(9)
 
 
 ## Compiles the shaders, freeing the ones they replace (their pipelines and uniform sets go with
@@ -1333,6 +1538,14 @@ func _create_shaders() -> bool:
 			rd.free_rid(s)
 	reflection_shaders = [RID(), RID()]
 	reflection_pipelines = [RID(), RID()]
+	# The engine_ssr_clouds shaders too.
+	for s : RID in ssr_depth_shaders:
+		if s.is_valid():
+			rd.free_rid(s)
+	ssr_depth_shaders = []
+	ssr_depth_pipelines = []
+	ssr_depth_render_pipelines.clear()
+	ssr_depth_failed = false
 	# The heightmap shaders too.
 	for s : RID in heightmap_shaders:
 		if s.is_valid():
@@ -1560,6 +1773,15 @@ func get_planet_center() -> Vector3:
 ## altitude above the planet's surface.
 func get_cloud_height(position : Vector3) -> float:
 	return position.distance_to(get_planet_center()) - planet_radius * 1000.0 * cloud_scale if spherical_planet else position.y
+
+
+## Where the skybox is rendered from with skybox_below_camera: skybox_below_distance (times
+## cloud_scale) under camera_position, at least a metre above the ground.
+func _skybox_origin(camera_position : Vector3) -> Vector3:
+	var up := get_planet_up(camera_position)
+	var lowest := (ground_height if !spherical_planet else 0.0) + 1.0 * cloud_scale # 1.0: m (times cloud_scale) the skybox stays above the ground.
+	var drop := minf(skybox_below_distance * cloud_scale, maxf(get_cloud_height(camera_position) - lowest, 0.0))
+	return camera_position - up * drop
 
 
 ## Up at position: away from the planet's centre with spherical_planet, else +Y.
@@ -2389,6 +2611,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						shadow_bytes.encode_s32(168, 1 if shadows_active && !projector else 0)
 						shadow_bytes.encode_float(172, screen_space_shadow_strength)
 						shadow_bytes.encode_float(176, cloud_shadow_edge_fade * extent * 0.5)
+						shadow_bytes.encode_float(180, screen_space_shadow_near_fade * extent * 0.5)
 						rd.buffer_update(shadow_buffer, 0, SHADOW_BYTES, shadow_bytes)
 					var groups := ceili(shadow_texture_resolution / 8.0)
 					if render:
@@ -2561,7 +2784,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 
 		if reflect && view == 0:
 			rd.capture_timestamp("Sunshine Clouds Reflection")
-			_write_reflection(color_layer, depth_layer, msaa, size, projection.inverse())
+			_write_reflection(color_layer, depth_layer, view_textures[parity], view_textures[4 + parity], msaa, size, projection.inverse())
 
 		if history_valid:
 			state.prev_view_projections[view] = view_projection
@@ -2666,7 +2889,16 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 	if Time.get_ticks_msec() - skybox_requested_msec >= 500: # How long a request_skybox() keeps the skybox updating (ms). 250-1000: long enough to cover a few update intervals.
 		return
 
+	# skybox_below_camera: rendered from under the camera, through its own Params (the camera's
+	# position moved down); the view's otherwise.
+	var below := skybox_below_camera && skybox_below_distance > 0.0
+	if below:
+		camera_position = _skybox_origin(camera_position)
+		if !skybox_params_buffer.is_valid():
+			skybox_params_buffer = rd.uniform_buffer_create(PARAMS_BYTES)
+	var sky_params := skybox_params_buffer if below else params_buffer
 	var inputs_changed := _set_input(skybox_set_inputs, 0, skybox_texture)
+	inputs_changed = _set_input(skybox_set_inputs, 8, sky_params) || inputs_changed
 	inputs_changed = _set_input(skybox_set_inputs, 1, skybox_keys[0]) || inputs_changed
 	inputs_changed = _set_input(skybox_set_inputs, 2, background_rid) || inputs_changed
 	for i in density_rids.size():
@@ -2677,7 +2909,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		var uniforms : Array[RDUniform] = [
 			_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, [nearest_sampler, transmittance_texture]),
 			_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, [noise_sampler, density_rids[0]]),
-			_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 3, [params_buffer]),
+			_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 3, [sky_params]),
 			_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, [lut_sampler, density_rids[1]]),
 			_uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 9, [atmosphere_buffer]),
 			_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 10, [lut_sampler, transmittance_texture]),
@@ -2734,6 +2966,15 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		skybox_key_lights = lights_version
 		skybox_blended = false
 		skybox_version += 1
+		if below:
+			# The view's Params (view 0's, just uploaded) with the camera at camera_position: its
+			# transform's origin, and the offset to the planet's centre with it.
+			var sky_bytes_params := params_bytes.duplicate()
+			sky_bytes_params.encode_float(64 + 48, camera_position.x)
+			sky_bytes_params.encode_float(64 + 52, camera_position.y)
+			sky_bytes_params.encode_float(64 + 56, camera_position.z)
+			_encode_vec4(sky_bytes_params, 208, camera_position - get_planet_center(), 1.0 if spherical_planet else 0.0)
+			rd.buffer_update(skybox_params_buffer, 0, PARAMS_BYTES, sky_bytes_params)
 		var list := rd.compute_list_begin()
 		rd.compute_list_bind_compute_pipeline(list, _pipeline(skybox_pipelines, layer_count + (MAX_LAYERS + 1) * int(lifted), sky_shader, layer_count))
 		rd.compute_list_bind_uniform_set(list, skybox_sets[1 + skybox_key if use_keys else 0], 0)

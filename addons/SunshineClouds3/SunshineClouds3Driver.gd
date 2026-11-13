@@ -282,6 +282,7 @@ func test_launched() -> void:
 func _process(delta : float) -> void:
 	_update_shadow_projector()
 	_update_skybox()
+	_update_ssr_depth_effects()
 	if !update_continuously || clouds_resource == null:
 		_show_hidden_lights()
 		return
@@ -341,6 +342,31 @@ func _process(delta : float) -> void:
 		layer.curl_noise_offset = origin_offset + _wrap(layer.curl_noise_offset - prev_origin_offset + wind * layer.curl_wind_speed,
 			layer.curl_noise_scale * scale)
 	prev_origin_offset = origin_offset
+
+
+## Keeps the pair of SunshineClouds3SSRDepth effects in world_environment's compositor (next to the
+## clouds) while the clouds' engine_ssr_clouds is on, and takes them out when it's off.
+func _update_ssr_depth_effects() -> void:
+	if clouds_resource == null || !is_instance_valid(world_environment) || world_environment.compositor == null:
+		return
+	var compositor := world_environment.compositor
+	var effects := compositor.compositor_effects
+	if !effects.has(clouds_resource):
+		return
+	var present := 0
+	for effect in effects:
+		if effect is SunshineClouds3SSRDepth && effect.clouds == clouds_resource:
+			present += 1
+	var wanted := clouds_resource.engine_ssr_clouds
+	if (present == 2) == wanted && (present == 0) != wanted:
+		return
+	var kept : Array[CompositorEffect] = []
+	for effect in effects:
+		if !(effect is SunshineClouds3SSRDepth && effect.clouds == clouds_resource):
+			kept.append(effect)
+	if wanted:
+		kept.append_array(clouds_resource.get_ssr_depth_effects())
+	compositor.compositor_effects = kept
 
 
 ## Hides a driven light whose colour has gone black (dark: its disc has set below the horizon), so
