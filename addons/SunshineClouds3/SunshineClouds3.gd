@@ -279,6 +279,7 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## falls back to Screen Space when the projector isn't available.
 @export_enum("Light Projector:0", "Screen Space:1") var cloud_shadow_mode : int = SHADOW_MODE_PROJECTOR
 @export_enum("512:512", "1024:1024", "2048:2048") var cloud_shadow_resolution : int = 512
+## Width of the area the shadows cover, centred on the camera (times cloud_scale).
 @export_range(1000.0, 512000.0, 100.0, "or_greater", "suffix:m") var cloud_shadow_extent : float = 80000.0
 @export_range(1, 64) var cloud_shadow_steps : int = 32
 @export_range(0.0, 1.0, 0.001, "or_greater") var cloud_shadow_strength : float = 0.549
@@ -287,9 +288,11 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## Frames between shadow map renders, blended from one to the next in between (1 = every frame).
 ## Higher saves GPU time; the shadows then trail the clouds by about this many frames.
 @export_range(1, 128) var cloud_shadow_update_interval : int = 12
+## Where the shadows start fading out towards the edge of the area they cover (cloud_shadow_extent,
+## centred on the camera), as a fraction of the way out: 1 = no fade, the shadows end at the edge.
+@export_range(0.0, 1.0, 0.01) var cloud_shadow_edge_fade : float = 0.7
 @export_subgroup("Screen Space")
 @export_range(0.0, 1.0, 0.01) var screen_space_shadow_strength : float = 0.6
-@export_range(0.0, 1.0, 0.01) var screen_space_shadow_fade : float = 0.7
 
 @export_group("Background")
 ## An equirectangular panorama behind the atmosphere (laid out as PanoramaSkyMaterial's): stars and
@@ -454,7 +457,8 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 
 @export_group("Shaders")
 ## In the editor, reload the shaders when one of the addon's .glsl or .glslinc files changes.
-@export var auto_reload_shaders : bool = true
+## Off by default: the check hashes every shader file once a second (~4.6 ms on the main thread).
+@export var auto_reload_shaders : bool = false
 ## Reimports and recompiles the shaders (the editor doesn't reimport the shaders including an
 ## edited .glslinc, and the clouds keep the shaders they compiled either way).
 @export_tool_button("Reload Shaders", "Reload") var reload_shaders_action = reload_shaders
@@ -600,6 +604,16 @@ var shadow_projector_size := Vector2i.ZERO
 var shadow_blit_material : RID
 var shadow_light_transform : Transform3D
 var shadow_projector_light_id := 0
+# The light space point (light local XY, metres) the projector's window is centred on
+# (set_shadow_projector_center()), and whether the light has repeat off and an offset (otherwise the
+# map goes on as it is, repeating). The blit centres the map on it and fades it out to the window's
+# edge.
+var shadow_projector_center := Vector2.ZERO
+var shadow_projector_windowed := false
+# The centre the driver should use next (the first viewport's camera, snapped to the map's texels),
+# written on the render thread and read on the main thread.
+var _shadow_projector_center_request := Vector2.ZERO
+var _shadow_projector_center_mutex := Mutex.new()
 
 # The lights and effectors for the clouds: encoded on the main thread by set_lights() and
 # set_effectors() when what they depend on (their keys) changes, none without a recent call;
@@ -1425,6 +1439,23 @@ func set_shadow_projector(target : RID, target_size : Vector2i, blit_material : 
 	shadow_blit_material = blit_material
 	shadow_light_transform = light_transform
 	shadow_projector_light_id = light_id
+
+
+## Called by SunshineClouds3Driver on the render thread: the light space point (light local XY) the
+## light's projector window is centred on (its offset is minus it), from the next blit on, and
+## whether the light has repeat off (windowed); otherwise the map is blitted as it is.
+func set_shadow_projector_center(center : Vector2, windowed : bool) -> void:
+	shadow_projector_center = center
+	shadow_projector_windowed = windowed
+
+
+## Called by SunshineClouds3Driver (main thread): the centre the projector's window should move to,
+## the first viewport's camera in the shadow light's space snapped to the map's texels.
+func get_shadow_projector_center_request() -> Vector2:
+	_shadow_projector_center_mutex.lock()
+	var center := _shadow_projector_center_request
+	_shadow_projector_center_mutex.unlock()
+	return center
 
 
 ## Called by SunshineClouds3Driver every frame (main thread), with set_effectors(): the lights on the
@@ -2300,6 +2331,14 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						light_to_world = Transform3D(Basis.looking_at(-shadow_caster_direction,
 							Vector3.FORWARD if absf(shadow_caster_direction.y) > 0.99 else Vector3.UP), Vector3.ZERO)
 					var world_to_light := light_to_world.affine_inverse()
+					if projector && first_viewport && shadow_projector_size.x > 0:
+						# The next window centre: the camera in light space, snapped to whole texels so
+						# the blit only moves the map by whole texels (no resampling, no swimming).
+						var texel := shadow_extent / shadow_projector_size.x
+						var camera_light := world_to_light * cam_transform.origin
+						_shadow_projector_center_mutex.lock()
+						_shadow_projector_center_request = (Vector2(camera_light.x, camera_light.y) / texel).round() * texel
+						_shadow_projector_center_mutex.unlock()
 					var to_sun := light_to_world.basis.z.normalized()
 					var sun_height := to_sun.dot(get_planet_up(cam_transform.origin))
 					# The horizon fade scales the strength. Faded out, screen space skips the map; the
@@ -2349,7 +2388,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						shadow_bytes.encode_float(164, minf(thickness / sun_height, thickness * 8.0) if shadows_active && sun_height > 0.001 else 0.0) # Max shadow march length as a multiple of layer thickness: with a low sun the march would otherwise run for hundreds of km. 4-16: lower is cheaper but clips long low-sun shadows.
 						shadow_bytes.encode_s32(168, 1 if shadows_active && !projector else 0)
 						shadow_bytes.encode_float(172, screen_space_shadow_strength)
-						shadow_bytes.encode_float(176, screen_space_shadow_fade * extent * 0.5)
+						shadow_bytes.encode_float(176, cloud_shadow_edge_fade * extent * 0.5)
 						rd.buffer_update(shadow_buffer, 0, SHADOW_BYTES, shadow_bytes)
 					var groups := ceili(shadow_texture_resolution / 8.0)
 					if render:
@@ -2377,8 +2416,17 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 							shadow_source = Texture2DRD.new()
 						if shadow_source.texture_rd_rid != shadow_texture:
 							shadow_source.texture_rd_rid = shadow_texture
+						# The map repeats every extent; the blit takes the window around
+						# shadow_projector_center out of it (r, g: the shift in texels over the
+						# resolution, b: where the edge fade starts, a: 1 = windowed).
+						var blit_params := Color(0.0, 0.0, 1.0, 0.0)
+						if shadow_projector_windowed:
+							var resolution := shadow_projector_size.x
+							var shift := Vector2i((shadow_projector_center * resolution / shadow_extent).round())
+							blit_params = Color(float(posmod(shift.x, resolution)) / resolution, float(posmod(-shift.y, resolution)) / resolution,
+								cloud_shadow_edge_fade, 1.0)
 						RenderingServer.call(&"texture_drawable_blit_rect", [shadow_projector], Rect2i(Vector2i.ZERO, shadow_projector_size),
-							shadow_blit_material, Color.WHITE, [shadow_source.get_rid()], 0)
+							shadow_blit_material, blit_params, [shadow_source.get_rid()], 0)
 
 			if first_viewport:
 				_update_skybox(cam_transform.origin, sun_direction, background_rid, [noise_rid, profile_rid, coverage_rid, curl_rid], layer_count, heightmap_rid)

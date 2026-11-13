@@ -84,6 +84,10 @@ var _sent_clouds := 0
 var _sent_projector := RID()
 var _sent_resolution := 0
 var _sent_light_transform := Transform3D()
+# The projector window centre last handed to the effect (set_shadow_projector_center()); the
+# light's offset follows it a frame later, when the atlas has the map blitted around it.
+var _sent_center := Vector2.ZERO
+var _sent_windowed := false
 
 # The Sky drawing the skybox (made the first time), and the Environment it's set on.
 var _skybox : Sky
@@ -406,7 +410,7 @@ func _update_shadow_projector() -> void:
 			push_warning("SunshineClouds3Driver: this Godot build has no directional light projectors, cloud shadows are screen space.")
 		light = null
 	if light != null && _shadow_projector == null && _is_cloud_projector(light.get(&"light_projector")):
-		light.set(&"light_projector", null)
+		_take_projector_off(light)
 	if light != null && light.get(&"light_projector") != null && light.get(&"light_projector") != _shadow_projector:
 		if _first_warning(light, 2): # Warning flag: light already has a projector texture. Each warning needs its own power of two (1, 2, 4, ...).
 			push_warning("SunshineClouds3Driver: %s already has a projector texture, cloud shadows are screen space." % light.name)
@@ -435,7 +439,18 @@ func _update_shadow_projector() -> void:
 		light.set(&"light_projector", _shadow_projector)
 	if light.get(&"light_projector_size") != extent:
 		light.set(&"light_projector_size", extent)
-	if "light_projector_offset" in light && light.get(&"light_projector_offset") != Vector2.ZERO:
+	# With repeat off (engines that have it) the projector only covers extent around its offset: the
+	# effect blits the map centred over the camera and faded out to the edge, and the offset moves
+	# the window there. The projector shows the map blitted last frame (the decal atlas copies it at
+	# the start of the next frame's draw), so the offset is the centre handed over then.
+	var windowed := "light_projector_repeat" in light && "light_projector_offset" in light
+	if windowed:
+		if light.get(&"light_projector_repeat") != false:
+			light.set(&"light_projector_repeat", false)
+		var offset := -_sent_center if _sent_windowed else Vector2.ZERO
+		if light.get(&"light_projector_offset") != offset:
+			light.set(&"light_projector_offset", offset)
+	elif "light_projector_offset" in light && light.get(&"light_projector_offset") != Vector2.ZERO:
 		light.set(&"light_projector_offset", Vector2.ZERO)
 	_shadow_light = light
 	var projector := _shadow_projector.get_rid()
@@ -446,6 +461,11 @@ func _update_shadow_projector() -> void:
 		_sent_light_transform = light.global_transform
 		RenderingServer.call_on_render_thread(clouds_resource.set_shadow_projector.bind(projector,
 			Vector2i(resolution, resolution), _shadow_blit_material.get_rid(), _sent_light_transform, light.get_instance_id()))
+	var center := clouds_resource.get_shadow_projector_center_request() if windowed else Vector2.ZERO
+	if center != _sent_center || windowed != _sent_windowed:
+		_sent_center = center
+		_sent_windowed = windowed
+		RenderingServer.call_on_render_thread(clouds_resource.set_shadow_projector_center.bind(center, windowed))
 
 
 ## Asks the effect for its skybox every frame and sets it as world_environment's sky on the
@@ -512,14 +532,27 @@ func _release_skybox() -> void:
 
 func _release_shadow_projector() -> void:
 	if is_instance_valid(_shadow_light) && _is_cloud_projector(_shadow_light.get(&"light_projector")):
-		_shadow_light.set(&"light_projector", null)
+		_take_projector_off(_shadow_light)
 	for light in _directional_nodes:
 		if is_instance_valid(light) && "light_projector" in light && _is_cloud_projector(light.get(&"light_projector")):
-			light.set(&"light_projector", null)
+			_take_projector_off(light)
 	_shadow_light = null
 	_sent_clouds = 0
+	_sent_center = Vector2.ZERO
+	_sent_windowed = false
 	if clouds_resource != null:
 		RenderingServer.call_on_render_thread(clouds_resource.set_shadow_projector.bind(RID(), Vector2i.ZERO, RID(), Transform3D.IDENTITY, 0))
+		RenderingServer.call_on_render_thread(clouds_resource.set_shadow_projector_center.bind(Vector2.ZERO, false))
+
+
+# Takes the cloud projector off light and puts its repeat and offset back to the defaults, so the
+# camera-following offset is never saved into the scene.
+func _take_projector_off(light : DirectionalLight3D) -> void:
+	light.set(&"light_projector", null)
+	if "light_projector_repeat" in light:
+		light.set(&"light_projector_repeat", true)
+	if "light_projector_offset" in light:
+		light.set(&"light_projector_offset", Vector2.ZERO)
 
 
 func _is_cloud_projector(texture : Texture2D) -> bool:

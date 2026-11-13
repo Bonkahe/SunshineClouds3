@@ -91,5 +91,5 @@ void fragment() {
 		color /= weights;
 	}
 
-	COLOR = vec4(mix(color * brightness, tint.rgb, tint.a), COLOR.a * coverage);
+	COLOR *= vec4(mix(color * brightness, tint.rgb, tint.a), coverage);
 }
