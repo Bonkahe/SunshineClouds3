@@ -1,9 +1,9 @@
 @tool
 extends EditorInspectorPlugin
-## The SunshineClouds3Driver's Cloud Lights and Cloud Effectors sections: a box per directional
-## light, omni light and effector, with the node and its settings in the inspector's own property
-## editors (the driver's cloud_lists/ fields), added, removed and edited with undo.
+## The driver's Cloud Lights and Cloud Effectors sections: a box per light or effector with its node and settings in
+## the inspector's own property editors (the driver's cloud_lists/ fields), all undoable.
 
+# Editor: the undo/redo manager list edits are recorded with.
 var undo_redo : EditorUndoRedoManager
 
 
@@ -34,6 +34,7 @@ class Lists extends VBoxContainer:
 		"effector": ["Effectors", "Effector", "Node3D"],
 	}
 
+	# Context: the driver being edited, the undo/redo manager, and the editor's display scale.
 	var driver : SunshineClouds3Driver
 	var undo_redo : EditorUndoRedoManager
 	var editor_scale := EditorInterface.get_editor_scale()
@@ -68,7 +69,7 @@ class Lists extends VBoxContainer:
 		add.pressed.connect(_add.bind(list))
 		add_child(add)
 
-	# The box of one: its node, its remove button top right, then its settings.
+	# One entry's box: node and remove button on top, then its settings.
 	func _box(list : String, index : int) -> Control:
 		var style := StyleBoxFlat.new()
 		style.bg_color = Color(0.0, 0.0, 0.0, 0.0)
@@ -127,12 +128,11 @@ class Lists extends VBoxContainer:
 				"Samples through the clouds towards the light per cloud sample. 0 = none (lit through).")))
 		var settings : Array = driver.get(SunshineClouds3Driver.LISTS[list][1])
 		if index < settings.size() && settings[index]:
-			# Deferred: the colour editor sets the colour back before it reports the picked one, and
-			# a refresh in between would put the old colour in its picker, so it reports nothing.
+			# Deferred: the colour editor resets the colour before reporting the pick; an immediate refresh would lose it.
 			settings[index].changed.connect(_refresh.bind(column), CONNECT_DEFERRED)
 		return box
 
-	# An option's editor, as wide as the node's beside the remove button so their columns line up.
+	# Pads an option's editor to the node editor's width so the columns line up.
 	func _padded(editor : EditorProperty) -> Control:
 		return _padded_control(editor)
 
@@ -159,8 +159,8 @@ class Lists extends VBoxContainer:
 		for editor : EditorProperty in column.find_children("*", "EditorProperty", true, false):
 			editor.update_property()
 
-	# One undo step per change. The colour editor previews a drag by setting the colour itself, and
-	# sets it back before reporting the picked one, so the old value here is the pre-drag one.
+	# One undo step per change. The colour editor previews a drag itself and resets it before reporting the pick,
+	# so old_value is the pre-drag one.
 	func _property_changed(property : StringName, value : Variant, _field : StringName, _changing : bool, label : String, editor : EditorProperty) -> void:
 		var old_value : Variant = driver.get(property)
 		if old_value != value:

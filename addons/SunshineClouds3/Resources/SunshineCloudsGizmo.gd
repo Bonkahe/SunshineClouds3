@@ -1,14 +1,12 @@
 @tool
 extends EditorNode3DGizmoPlugin
-## Where SunshineEffectors and SunshineOmniLights reach on the clouds, in the 3D viewport: three
-## circles at the radius they're encoded with and a handle that drags it, with undo.
-## - A SunshineEffector's radius (times its largest scale, as the clouds use it) on its X axis, blue
-##   adding and red clearing, with where its falloff starts fainter.
-## - A SunshineOmniLight's cloud_radius on its Y axis (Godot's own gizmo has omni_range on X), in a
-##   warm yellow apart from the light's own range sphere.
+## Draws SunshineEffector and SunshineOmniLight reach on the clouds: three circles and a radius handle, with undo.
+## - SunshineEffector: radius times its largest scale, handle on X; blue adds, red clears, fainter where falloff starts.
+## - SunshineOmniLight: cloud_radius, handle on Y (Godot's own gizmo has omni_range on X), warm yellow to stand apart.
 
 const SEGMENTS := 64
 
+# Editor: the undo/redo manager handle drags are recorded with.
 var undo_redo : EditorUndoRedoManager
 
 
@@ -87,8 +85,7 @@ func _radius_property(node : Node3D) -> StringName:
 	return &"cloud_radius" if node is SunshineOmniLight else &"radius"
 
 
-# What the radius is multiplied by on the clouds: an effector's largest scale. A light's range
-# ignores its scale, as Godot's own does.
+# Effectors scale their radius by their largest scale; lights ignore scale, as Godot's own range does.
 func _radius_scale(node : Node3D) -> float:
 	if node is SunshineOmniLight:
 		return 1.0
@@ -101,8 +98,7 @@ func _handle_axis(node : Node3D) -> Vector3:
 	return (basis.y if node is SunshineOmniLight else basis.x).normalized()
 
 
-# Three circles of radius (world units) around the node, in the planes of its axes, as line segments
-# in its local space (its scale undone, so they stay round).
+# Three circles of radius (world units) in the node's axis planes, as local-space segments unscaled so they stay round.
 func _sphere_lines(node : Node3D, radius : float) -> PackedVector3Array:
 	var basis := node.global_transform.basis.orthonormalized()
 	var planes := [[basis.x, basis.y], [basis.y, basis.z], [basis.z, basis.x]]

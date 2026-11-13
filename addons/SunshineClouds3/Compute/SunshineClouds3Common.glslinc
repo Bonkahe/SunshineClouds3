@@ -1,6 +1,5 @@
-// Shared by SunshineClouds3Raymarch.glsl and SunshineClouds3Resolve.glsl. Define CLOUD_SHADOWS
-// before including it for the Shadow block, and MSAA for the versions used with 3D MSAA, which
-// read the multisampled depth (see msaa_nearest_depth()).
+// Shared by SunshineClouds3Raymarch.glsl and SunshineClouds3Resolve.glsl. Define CLOUD_SHADOWS for the Shadow block,
+// and MSAA for the 3D MSAA versions, which read multisampled depth.
 
 #ifdef MSAA
 layout(set = 0, binding = 1) uniform sampler2DMS depth_texture;
@@ -54,12 +53,12 @@ layout(set = 0, binding = 3, std140) uniform Params {
 	float ambient_occlusion; // 356, 0 = profile ambient, 1 = density-aware
 	float ambient_ground_strength; // 360, light from below as a fraction of the sky's
 	float ambient_extinction_scale; // 364
-	vec3 ground_color; // 368, the ambient's light from below
-	// The directional lights the atmosphere is lit by (SunshineClouds3.gd's _encode_atmosphere_lights:
-	// the clouds' lights, less those with no light and those too far below the horizon to light it).
+	vec3 ground_color; // 368, ambient light from below
+	// Lights the atmosphere (SunshineClouds3.gd's _encode_atmosphere_lights): the clouds' lights minus unlit
+	// ones and those too far below the horizon.
 	int atmosphere_light_count; // 380
-	// Per light: towards it (xyz), how much its disc covers what's behind it (w: its energy, at most
-	// 1); its weight (rgb: colour * energy, 1 being the atmosphere's own sun), unused (w).
+	// Per light: direction to it (xyz), how much its disc covers what's behind it (w: energy, max 1);
+	// weight (rgb: colour * energy, 1 = the atmosphere's own sun), unused (w).
 	vec4 atmosphere_lights[MAX_DIRECTIONAL_LIGHTS * 2]; // 384
 } params;
 
@@ -98,13 +97,13 @@ layout(set = 0, binding = 15, std140) uniform Layers {
 layout(set = 0, binding = 19, std140) uniform Shadow {
 	mat4 light_to_world; // 0
 	mat4 world_to_light; // 64
-	float extent; // 128, metres the map covers around the camera (and repeats every)
+	float extent; // 128, metres the map covers around the camera (also its repeat period)
 	int resolution; // 132
 	float strength; // 136
 	float sharpness; // 140
 	vec3 camera_light; // 144, the camera in light space
 	int steps; // 156
-	float march_floor; // 160, world height of the bottom of the lowest layer
+	float march_floor; // 160, world height of the lowest layer's floor
 	float march_length; // 164, along the sun from there (0: sun too low)
 	int screen_space; // 168
 	float screen_space_strength; // 172
@@ -113,30 +112,26 @@ layout(set = 0, binding = 19, std140) uniform Shadow {
 } shadow;
 #endif
 
-// Cloud distance (m) from a raymarch or history texel's light absorption and absorption weighted
-// distance (km); max_distance where it holds no cloud.
+// Cloud distance (m) from a texel's absorption and absorption-weighted distance (km); max_distance if no cloud.
 float cloud_distance(float absorption, float weighted_distance) {
 	return absorption > 0.0 ? clamp(weighted_distance / absorption * 1000.0, 0.0, params.max_distance) : params.max_distance;
 }
 
-// Whether a cloud (light absorption, cloud distance in m) is opaque well in front of distance, so
-// nothing from there on shows through it.
+// Whether a cloud (absorption, distance in m) is opaque well in front of distance, hiding everything from there on.
 bool opaque_before(float absorption, float cloud, float distance) {
 	return absorption >= 0.99 && cloud < 0.5 * distance;
 }
 
-// Whether rays to scene distances a and b (m) hold the same cloud, one of them holding the cloud
-// given: their distances are near each other, or that cloud hides both (a far silhouette behind
-// opaque cloud changes nothing in front of it).
+// Whether rays to scene distances a and b (m), one holding the given cloud, see the same cloud: the distances are
+// within 2x, or that cloud hides both (a far silhouette behind opaque cloud changes nothing in front of it).
 bool same_cloud(float a, float b, float absorption, float cloud) {
 	float nearer = min(a, b);
 	return nearer >= 0.5 * max(a, b) || opaque_before(absorption, cloud, nearer);
 }
 
-// same_cloud, also matching when the texel's light absorption is within 0.02 of the pixel's own
-// (own_absorption, from its texels at its own distance; negative when it has none): across a far
-// silhouette the cloud in front of it hardly changes, while a near object's texel holds little of
-// the cloud behind it.
+// same_cloud, or the texel's absorption is within 0.02 of the pixel's own (own_absorption, from its texels at its
+// distance; negative if none): across a far silhouette the cloud in front hardly changes, while a near object's
+// texel holds little of the cloud behind it.
 bool same_cloud_own(float a, float b, float absorption, float cloud, float own_absorption) {
 	return same_cloud(a, b, absorption, cloud) || (own_absorption >= 0.0 && abs(absorption - own_absorption) < 0.02);
 }
@@ -145,13 +140,12 @@ bool spherical_planet() {
 	return params.planet.w > 0.0;
 }
 
-// World position (m) relative to the planet centre (via the camera's, which the CPU works out).
+// World position (m) relative to the planet centre (via the camera's offset, computed on the CPU).
 vec3 planet_offset(vec3 world) {
 	return world - params.camera_to_world[3].xyz + params.planet.xyz;
 }
 
-// The height (m) the layers and shadows are placed by: world Y, or on a spherical planet the
-// altitude above its surface.
+// Height (m) layers and shadows use: world Y, or altitude above the surface on a spherical planet.
 float planet_height(vec3 world) {
 	return spherical_planet() ? length(planet_offset(world)) - params.planet_radius * 1000.0 : world.y;
 }
@@ -160,8 +154,7 @@ vec3 planet_up(vec3 world) {
 	return spherical_planet() ? normalize(planet_offset(world)) : vec3(0.0, 1.0, 0.0);
 }
 
-// Where a ray crosses height (as planet_height()), t0 <= t1: the sphere's two crossings, or the
-// plane's (both the same) when flat. False when it misses.
+// Ray distances t0 <= t1 where it crosses height (as planet_height()); equal when flat. False on a miss.
 bool height_crossings(vec3 origin, vec3 direction, float height, out float t0, out float t1) {
 	if (!spherical_planet()) {
 		t0 = (height - origin.y) / direction.y;
@@ -186,10 +179,9 @@ bool height_crossings(vec3 origin, vec3 direction, float height, out float t0, o
 	return true;
 }
 
-// World position (m) -> atmosphere position (km, planet centre at the origin). The flat world is
-// wrapped onto the planet around the camera, keeping altitude and horizontal distance; a spherical
-// one is the planet already. Below the ground (a camera under ground_height, in a cave or under
-// water) it's on the ground: the atmosphere has no air there, and its lookups break under it.
+// World position (m) -> atmosphere position (km, planet centre at origin). A flat world is wrapped onto the planet
+// around the camera, keeping altitude and horizontal distance. Clamped to the ground (e.g. a camera in a cave or
+// under water): the atmosphere has no air below it and its lookups break there.
 vec3 atmosphere_position(vec3 world) {
 	float bottom_radius = params.planet_radius;
 	if (spherical_planet()) {
@@ -209,10 +201,8 @@ vec3 atmosphere_position(vec3 world) {
 }
 
 #ifdef MSAA
-// With 3D MSAA every depth the clouds use is a real sample's. Godot's own depth resolve averages
-// the samples, which at a silhouette is a surface between the two that isn't there. The nearest
-// sample's (reverse Z: the largest) is what the raymarch traces to and the resolve reconstructs
-// and keeps history for, as the depth is without MSAA.
+// Nearest sample's depth (reverse Z: the largest), used for every cloud depth under 3D MSAA. Godot's depth resolve
+// averages samples, which at a silhouette gives a surface between the two that isn't there.
 float msaa_nearest_depth(ivec2 pixel) {
 	float nearest = 0.0;
 	for (int i = 0; i < textureSamples(depth_texture); i++) {
@@ -221,17 +211,15 @@ float msaa_nearest_depth(ivec2 pixel) {
 	return nearest;
 }
 
-// How alike two depths are: smaller over larger, 1 when equal (both 0: nothing drawn). Under a
-// perspective projection reverse Z depth goes with 1 / distance, so it's their distances' ratio.
+// Smaller over larger, 1 when equal (both 0: nothing drawn). Reverse Z perspective depth goes with 1 / distance, so
+// this is the distances' ratio.
 float depth_ratio(float a, float b) {
 	return a == b ? 1.0 : min(a, b) / max(a, b);
 }
 
-// Which of a pixel's samples are on its far surface rather than its near one (bit i for sample
-// i; each goes with the one its depth is more alike), and both surfaces' depths (nearest as
-// msaa_nearest_depth()): the resolve reconstructs the far surface's clouds too and the composite
-// gives those samples them. 0 when the farthest sample is near enough to the nearest for their
-// clouds to be the same (same_cloud's half distance), as on a sloped surface.
+// Bitmask of a pixel's samples on its far surface (each goes with the surface its depth is closer to), plus both
+// surfaces' depths. The resolve also reconstructs the far surface's clouds and the composite gives them to those
+// samples. 0 when nearest and farthest are within same_cloud's 2x (e.g. a sloped surface).
 uint msaa_far_samples(ivec2 pixel, out float nearest, out float farthest) {
 	int samples = textureSamples(depth_texture);
 	nearest = 0.0;
@@ -267,9 +255,8 @@ float surface_distance(ivec2 pixel) {
 	return surface_distance(pixel, msaa_nearest_depth(pixel));
 }
 #else
-// Distance (m) to the opaque scene at a pixel; 0 where nothing was drawn (reverse Z). The MSAA
-// versions' is a function of the depth; this one is kept whole: a call in it changes the
-// raymarch's compiled code, which measured slower.
+// Distance (m) to the opaque scene at a pixel; 0 where nothing was drawn (reverse Z). Not split into a depth overload
+// like MSAA's: that changed the raymarch's compiled code and measured slower.
 float surface_distance(ivec2 pixel) {
 	float depth = texelFetch(depth_texture, pixel, 0).r;
 	if (depth <= 0.0) {
@@ -302,9 +289,8 @@ void camera_ray(ivec2 pixel, out vec3 ray_origin, out vec3 ray_direction, out fl
 	max_distance = scene_distance(pixel);
 }
 
-// The wind delta to reproject a cloud point distance (m) from the camera by: that of the layer
-// nearest its height, faded out nearer than wind_reprojection_distance, where a frame's wind is a
-// big screen jump (ghosting) over cloud that hardly changes in it.
+// Reprojection wind delta for a cloud point distance (m) from the camera: that of the layer nearest its height, faded
+// out nearer than wind_reprojection_distance, where a frame's wind is a big screen jump (ghosting).
 vec3 reprojection_wind_delta(vec3 cloud_world, float distance) {
 	vec3 wind_delta = vec3(0.0);
 	float nearest = 1e30;
@@ -320,10 +306,9 @@ vec3 reprojection_wind_delta(vec3 cloud_world, float distance) {
 	return wind_delta * fade;
 }
 
-// The history (both textures; history_b's r is the scene distance in km) at uv, bilinear over the
-// 2x2 texels around it but only from texels whose scene distance last frame was near distance (or
-// whose cloud hid both, or whose absorption matches own_absorption: see same_cloud_own; -1 for
-// none), so nothing bleeds across silhouettes. valid is false when no texel matches.
+// Bilinear history (both textures; history_b.r = scene distance in km) at uv, from only the 2x2 texels passing
+// same_cloud_own against distance (own_absorption -1 for none), so nothing bleeds across silhouettes. valid is false
+// when none match.
 vec4 sample_history(sampler2D history, sampler2D history_b, vec2 uv, float distance, out vec4 value_b, out bool valid, float own_absorption) {
 	ivec2 size = ivec2(params.screen_size);
 	vec2 position = uv * vec2(size) - 0.5;
@@ -369,8 +354,7 @@ ivec2 raymarch_size() {
 	return (ivec2(params.screen_size) + divisor - 1) / divisor;
 }
 
-// The full resolution pixel a raymarch texel traces this frame: one of its N x N block, picked by
-// white noise per block and frame.
+// Full resolution pixel a raymarch texel traces this frame: one of its N x N block, by white noise per block and frame.
 ivec2 traced_pixel(ivec2 texel) {
 	int divisor = params.raymarch_resolution;
 	uint hash = pcg3d(uvec3(uvec2(texel), params.frame ^ 0x9E3779B9u)).z;

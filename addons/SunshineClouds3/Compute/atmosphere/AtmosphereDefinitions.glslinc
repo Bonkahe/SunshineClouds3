@@ -27,28 +27,10 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/*<h2>atmosphere/definitions.glsl</h2>
-
-<p>This GLSL file defines the physical types and constants which are used in the
-main <a href="functions.glsl.html">functions</a> of our atmosphere model, in
-such a way that they can be compiled by a GLSL compiler (a
-<a href="reference/definitions.h.html">C++ equivalent</a> of this file
-provides the same types and constants in C++, to allow the same functions to be
-compiled by a C++ compiler - see the <a href="../index.html">Introduction</a>).
-
-<h3>Physical quantities</h3>
-
-<p>The physical quantities we need for our atmosphere model are
-<a href="https://en.wikipedia.org/wiki/Radiometry">radiometric</a> and
-<a href="https://en.wikipedia.org/wiki/Photometry_(optics)">photometric</a>
-quantities. In GLSL we can't define custom numeric types to enforce the
-homogeneity of expressions at compile time, so we define all the physical
-quantities as <code>float</code>, with preprocessor macros (there is no
-<code>typedef</code> in GLSL).
-
-<p>We start with six base quantities: length, wavelength, angle, solid angle,
-power and luminous power (wavelength is also a length, but we distinguish the
-two for increased clarity).
+/*
+atmosphere/definitions.glsl: physical types and constants used by functions.glsl. GLSL has no typedef or
+custom numeric types, so physical quantities are float macros (Bruneton's C++ reference version enforces
+units at compile time). Six base quantities follow.
 */
 
 #define Length float
@@ -58,12 +40,7 @@ two for increased clarity).
 #define Power float
 #define LuminousPower float
 
-/*
-<p>From this we "derive" the irradiance, radiance, spectral irradiance,
-spectral radiance, luminance, etc, as well pure numbers, area, volume, etc (the
-actual derivation is done in the <a href="reference/definitions.h.html">C++
-equivalent</a> of this file).
-*/
+/* Derived quantities. */
 
 #define Number float
 #define InverseLength float
@@ -82,15 +59,7 @@ equivalent</a> of this file).
 #define Luminance float
 #define Illuminance float
 
-/*
-<p>We  also need vectors of physical quantities, mostly to represent functions
-depending on the wavelength. In this case the vector elements correspond to
-values of a function at some predefined wavelengths. Again, in GLSL we can't
-define custom vector types to enforce the homogeneity of expressions at compile
-time, so we define these vector types as <code>vec3</code>, with preprocessor
-macros. The full definitions are given in the
-<a href="reference/definitions.h.html">C++ equivalent</a> of this file).
-*/
+/* Spectra: each vec3 element is the function's value at one of the predefined wavelengths. */
 
 // A generic function from Wavelength to some other type.
 #define AbstractSpectrum vec3
@@ -104,26 +73,17 @@ macros. The full definitions are given in the
 #define RadianceSpectrum vec3
 // A function from Wavelength to SpectralRadianceDensity.
 #define RadianceDensitySpectrum vec3
-// A function from Wavelength to ScaterringCoefficient.
+// A function from Wavelength to ScatteringCoefficient.
 #define ScatteringSpectrum vec3
 
 // A position in 3D (3 length values).
 #define Position vec3
-// A unit direction vector in 3D (3 unitless values).
+// A unit direction vector in 3D.
 #define Direction vec3
-// A vector of 3 luminance values.
 #define Luminance3 vec3
-// A vector of 3 illuminance values.
 #define Illuminance3 vec3
 
-/*
-<p>Finally, we also need precomputed textures containing physical quantities in
-each texel. Since we can't define custom sampler types to enforce the
-homogeneity of expressions at compile time in GLSL, we define these texture
-types as <code>sampler2D</code> and <code>sampler3D</code>, with preprocessor
-macros. The full definitions are given in the
-<a href="reference/definitions.h.html">C++ equivalent</a> of this file).
-*/
+/* Precomputed textures of physical quantities. */
 
 #define TransmittanceTexture sampler2D
 #define AbstractScatteringTexture sampler3D
@@ -132,13 +92,7 @@ macros. The full definitions are given in the
 #define ScatteringDensityTexture sampler3D
 #define IrradianceTexture sampler2D
 
-/*
-<h3>Physical units</h3>
-
-<p>We can then define the units for our six base physical quantities:
-meter (m), nanometer (nm), radian (rad), steradian (sr), watt (watt) and lumen
-(lm):
-*/
+/* Base units. */
 
 const Length m = 1.0;
 const Wavelength nm = 1.0;
@@ -147,10 +101,7 @@ const SolidAngle sr = 1.0;
 const Power watt = 1.0;
 const LuminousPower lm = 1.0;
 
-/*
-<p>From which we can derive the units for some derived physical quantities,
-as well as some derived units (kilometer km, kilocandela kcd, degree deg):
-*/
+/* Derived units. */
 
 const float PI = 3.14159265358979323846;
 
@@ -171,17 +122,10 @@ const LuminousIntensity kcd = 1000.0 * cd;
 const Luminance cd_per_square_meter = cd / m2;
 const Luminance kcd_per_square_meter = kcd / m2;
 
-/*
-<h3>Atmosphere parameters</h3>
+/* Atmosphere parameters. */
 
-<p>Using the above types, we can now define the parameters of our atmosphere
-model. We start with the definition of density profiles, which are needed for
-parameters that depend on the altitude:
-*/
-
-// An atmosphere layer of width 'width', and whose density is defined as
-//   'exp_term' * exp('exp_scale' * h) + 'linear_term' * h + 'constant_term',
-// clamped to [0,1], and where h is the altitude.
+// A layer of width 'width' whose density at altitude h is, clamped to [0,1],
+//   'exp_term' * exp('exp_scale' * h) + 'linear_term' * h + 'constant_term'.
 struct DensityProfileLayer {
   Length width;
   Number exp_term;
@@ -190,66 +134,41 @@ struct DensityProfileLayer {
   Number constant_term;
 };
 
-// An atmosphere density profile made of several layers on top of each other
-// (from bottom to top). The width of the last layer is ignored, i.e. it always
-// extend to the top atmosphere boundary. The profile values vary between 0
-// (null density) to 1 (maximum density).
+// Layers stacked bottom to top; the last layer's width is ignored (it extends to the top of the
+// atmosphere). Values range from 0 (null density) to 1 (maximum density).
 struct DensityProfile {
   DensityProfileLayer layers[2];
 };
 
-/*
-The atmosphere parameters are then defined by the following struct:
-*/
-
 struct AtmosphereParameters {
-  // The solar irradiance at the top of the atmosphere.
+  // Solar irradiance at the top of the atmosphere.
   IrradianceSpectrum solar_irradiance;
-  // The sun's angular radius. Warning: the implementation uses approximations
-  // that are valid only if this angle is smaller than 0.1 radians.
+  // Must be below 0.1 rad: the implementation's approximations assume a small sun.
   Angle sun_angular_radius;
-  // The distance between the planet center and the bottom of the atmosphere.
+  // Distance from the planet center to the bottom of the atmosphere.
   Length bottom_radius;
-  // The distance between the planet center and the top of the atmosphere.
+  // Distance from the planet center to the top of the atmosphere.
   Length top_radius;
-  // The density profile of air molecules, i.e. a function from altitude to
-  // dimensionless values between 0 (null density) and 1 (maximum density).
+  // Air molecule density, altitude -> 0 (null) .. 1 (maximum).
   DensityProfile rayleigh_density;
-  // The scattering coefficient of air molecules at the altitude where their
-  // density is maximum (usually the bottom of the atmosphere), as a function of
-  // wavelength. The scattering coefficient at altitude h is equal to
-  // 'rayleigh_scattering' times 'rayleigh_density' at this altitude.
+  // Air molecule scattering coefficient where density is maximum (usually the ground), per wavelength.
+  // At altitude h it is this times rayleigh_density(h).
   ScatteringSpectrum rayleigh_scattering;
-  // The density profile of aerosols, i.e. a function from altitude to
-  // dimensionless values between 0 (null density) and 1 (maximum density).
+  // Aerosol density, altitude -> 0 (null) .. 1 (maximum).
   DensityProfile mie_density;
-  // The scattering coefficient of aerosols at the altitude where their density
-  // is maximum (usually the bottom of the atmosphere), as a function of
-  // wavelength. The scattering coefficient at altitude h is equal to
-  // 'mie_scattering' times 'mie_density' at this altitude.
+  // Aerosol scattering coefficient where density is maximum, per wavelength; times mie_density(h) at altitude h.
   ScatteringSpectrum mie_scattering;
-  // The extinction coefficient of aerosols at the altitude where their density
-  // is maximum (usually the bottom of the atmosphere), as a function of
-  // wavelength. The extinction coefficient at altitude h is equal to
-  // 'mie_extinction' times 'mie_density' at this altitude.
+  // Aerosol extinction coefficient where density is maximum, per wavelength; times mie_density(h) at altitude h.
   ScatteringSpectrum mie_extinction;
-  // The asymetry parameter for the Cornette-Shanks phase function for the
-  // aerosols.
+  // Asymmetry parameter of the aerosols' Cornette-Shanks phase function.
   Number mie_phase_function_g;
-  // The density profile of air molecules that absorb light (e.g. ozone), i.e.
-  // a function from altitude to dimensionless values between 0 (null density)
-  // and 1 (maximum density).
+  // Density of light-absorbing molecules (e.g. ozone), altitude -> 0 (null) .. 1 (maximum).
   DensityProfile absorption_density;
-  // The extinction coefficient of molecules that absorb light (e.g. ozone) at
-  // the altitude where their density is maximum, as a function of wavelength.
-  // The extinction coefficient at altitude h is equal to
-  // 'absorption_extinction' times 'absorption_density' at this altitude.
+  // Absorber extinction coefficient where density is maximum, per wavelength; times absorption_density(h).
   ScatteringSpectrum absorption_extinction;
-  // The average albedo of the ground.
+  // Average ground albedo.
   DimensionlessSpectrum ground_albedo;
-  // The cosine of the maximum Sun zenith angle for which atmospheric scattering
-  // must be precomputed (for maximum precision, use the smallest Sun zenith
-  // angle yielding negligible sky light radiance values. For instance, for the
-  // Earth case, 102 degrees is a good choice - yielding mu_s_min = -0.2).
+  // Cosine of the maximum sun zenith angle to precompute for. For best precision use the smallest angle
+  // giving negligible sky radiance (Earth: 102 degrees, mu_s_min = -0.2).
   Number mu_s_min;
 };

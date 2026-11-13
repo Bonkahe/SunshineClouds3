@@ -18,10 +18,9 @@ sample_points_heightmap = "#define SAMPLE_POINTS\n#define HEIGHTMAP";
 
 VERSION_DEFINES
 
-// Everything that samples the cloud density: the view raymarch, the sun space shadow map and the
-// skybox (and the blend between two of each, when they aren't rendered every frame) and the density
-// at queued points (add_sample()). The _heightmap versions, used while SunshineClouds3.gd's heightmap
-// is on, lift the layers over the terrain (HEIGHTMAP); the others are compiled without any of it.
+// Everything that samples cloud density: the view raymarch, the sun space shadow map, the skybox (each of those two
+// with a blend pass for when not rendered every frame) and queued points (add_sample()). The _heightmap versions,
+// used while SunshineClouds3.gd's heightmap is on, lift the layers over the terrain.
 
 #ifdef SHADOW_MAP
 #define CLOUD_SHADOWS
@@ -31,8 +30,7 @@ VERSION_DEFINES
 layout(constant_id = 0) const uint LAYER_COUNT_U = 1u;
 #define LAYER_COUNT int(LAYER_COUNT_U)
 layout(set = 0, binding = 2) uniform sampler3D noise_texture;
-// Each layer's curves over its height, a row per layer: r = vertical profile, g = detail strength,
-// b = curl strength.
+// A row per layer, over its height: r = vertical profile, g = detail strength, b = curl strength.
 layout(set = 0, binding = 4) uniform sampler2D profile_texture;
 layout(set = 0, binding = 13) uniform sampler2D coverage_texture;
 // rgb = flow vector, 0.5 = none.
@@ -40,30 +38,25 @@ layout(set = 0, binding = 14) uniform sampler3D curl_texture;
 
 vec2 profile_size;
 
-// std140, 1296 bytes (SunshineClouds3.gd's lights_buffer), written by SunshineClouds3.gd at the offsets noted here.
-// Radiances are in scene units.
+// std140, 1296 bytes (SunshineClouds3.gd's lights_buffer), at the offsets noted here. Radiances in scene units.
 layout(set = 0, binding = 26, std140) uniform Lights {
 	int directional_count; // 0
 	int omni_count; // 4
 	bool atmosphere_enabled; // 8, the directional lights pass through the atmosphere
 	int effector_count; // 12
-	// Per light: towards it (xyz), first shadow step (w); radiance above the atmosphere (rgb),
-	// shadow samples (w).
+	// Per light: direction to it (xyz), first shadow step (w); radiance above the atmosphere (rgb), shadow samples (w).
 	vec4 directional[MAX_DIRECTIONAL_LIGHTS * 2]; // 16
-	// 3 per point: the omni lights, then the effectors right after them. Omni light: position
-	// (xyz), range (w); radiance (rgb), attenuation exponent (w); shadow samples (x), first shadow
-	// step (y). Effector: position (xyz), radius (w); coverage added at its centre (x), 1 / the
-	// width of its fade (y).
-	vec4 points[24 * 3]; // 144. 24 points: must equal SunshineClouds3.gd's MAX_OMNI_LIGHTS + MAX_EFFECTORS, at most 32 (one bit each).
+	// 3 per point, omni lights then effectors. Omni: position (xyz), range (w); radiance (rgb), attenuation exponent
+	// (w); shadow samples (x), first shadow step (y). Effector: position (xyz), radius (w); coverage added at centre
+	// (x), 1 / fade width (y).
+	vec4 points[24 * 3]; // 144. 24 must equal SunshineClouds3.gd's MAX_OMNI_LIGHTS + MAX_EFFECTORS, at most 32 (one bit each).
 } lights;
 
-// The bits of count points from first.
 uint point_bits(int first, int count) {
 	return ((1u << uint(count)) - 1u) << uint(first);
 }
 
-// The points from first (count of them) whose sphere a ray's stretch from t0 to t1 passes through,
-// as bits by index.
+// Bitmask (by index) of points [first, first + count) whose sphere the ray passes through between t0 and t1.
 uint points_along(vec3 origin, vec3 direction, float t0, float t1, int first, int count) {
 	uint mask = 0u;
 	if (t0 < t1) {
@@ -78,10 +71,10 @@ uint points_along(vec3 origin, vec3 direction, float t0, float t1, int first, in
 	return mask;
 }
 
-// The effectors sample_density() applies: those along the ray being marched.
+// Effectors sample_density() applies: those along the ray being marched.
 uint effector_mask = 0u;
 
-// Coverage the effectors in effector_mask add at p: each its strength, fading out to its radius.
+// Coverage effector_mask's effectors add at p: each its strength, fading out to its radius.
 float effector_coverage(vec3 p) {
 	float total = 0.0;
 	for (uint mask = effector_mask; mask != 0u; mask &= mask - 1u) {
@@ -95,19 +88,17 @@ float effector_coverage(vec3 p) {
 }
 
 #ifdef HEIGHTMAP
-// The terrain heightmap (SunshineClouds3.gd's heightmap settings). Terrain rising into a layer lifts
-// it: a sample at height h over terrain at height T reads the layer at h - push, push being how far
-// T is above the layer's floor (0 where it's below) times a weight that is 1 up to falloff_min above
-// the terrain and fades (smoothstep) to 0 at falloff_max above it. The bottom of a layer over a
-// mountain sits on the mountain, its top bumps up less or not at all. The noise is read at the
-// lifted point too, so the cloud there is the unlifted cloud's, moved up.
-// std140, 48 bytes (SunshineClouds3.gd's HEIGHTMAP_BYTES), written by SunshineClouds3.gd at the offsets noted here.
+// Terrain heightmap: terrain rising into a layer lifts it. A sample at height h over terrain T reads the layer at
+// h - push: push = max(T - layer floor, 0) * a weight that is 1 up to falloff_min above the terrain and smoothsteps to
+// 0 at falloff_max. A layer's bottom sits on a mountain, its top bumps up less or not at all. Noise is read at the
+// lifted point too, so the cloud is the unlifted cloud moved up.
+// std140, 48 bytes (SunshineClouds3.gd's HEIGHTMAP_BYTES), at the offsets noted here.
 layout(set = 0, binding = 35, std140) uniform Heightmap {
 	vec2 origin; // 0, world XZ of the texture's (0, 0) corner (its outer edge)
-	vec2 inv_size; // 8, 1 / the world size it covers on X and Z
-	float base; // 16, the height (as planet_height()) of a texel value of 0
+	vec2 inv_size; // 8, 1 / world size covered on X and Z
+	float base; // 16, height (as planet_height()) of a texel value of 0
 	float height_scale; // 20, metres per texel value
-	float max_height; // 24, the most the terrain rises above base: higher values are clamped to it
+	float max_height; // 24, max terrain rise above base; higher values are clamped
 	float falloff_min; // 28
 	float inv_falloff_range; // 32, 1 / (falloff_max - falloff_min)
 	float terrain_top; // 36, base + max_height
@@ -116,13 +107,12 @@ layout(set = 0, binding = 35, std140) uniform Heightmap {
 } heightmap;
 layout(set = 0, binding = 34) uniform sampler2D heightmap_texture;
 
-// The terrain under the last sample_density() point: x = its height (-1e30 where there's none), y =
-// the lift's weight at the point. cloud_ambient() uses it; light_transmittance() keeps the view's.
+// Terrain under the last sample_density() point: x = height (-1e30 if none), y = lift weight there.
+// cloud_ambient() uses it; light_transmittance() keeps the view's.
 vec2 terrain = vec2(-1e30, 0.0);
 
-// The terrain under p (at height, planet_height(p)), as terrain: none above reach_top. Outside the
-// heightmap it's the edge's (the sampler clamps to the edge texels: it doesn't repeat). One texture
-// sample.
+// Terrain under p (at height = planet_height(p)), as terrain; none above reach_top. Outside the heightmap it's the
+// edge's (the sampler clamps, not repeats).
 vec2 terrain_at(vec3 p, float height) {
 	if (height >= heightmap.reach_top) {
 		return vec2(-1e30, 0.0);
@@ -133,14 +123,12 @@ vec2 terrain_at(vec3 p, float height) {
 	return vec2(terrain_height, 1.0 - fade * fade * (3.0 - 2.0 * fade));
 }
 
-// How far layer index is lifted at the terrain sample in terrain.
 float layer_lift(int index) {
 	return max(terrain.x - cloud_layers.layers[index].cloud_floor, 0.0) * terrain.y;
 }
 
-// The highest a lifted layer reaches: its ceiling, lifted by the most the terrain can rise above its
-// floor, but no higher than reach_top (unless it's above it already). The ray clipping uses it, so
-// lifted cloud isn't skipped.
+// Highest a lifted layer reaches: its ceiling plus the most the terrain rises above its floor, capped at reach_top
+// (unless already above it). Used for ray clipping so lifted cloud isn't skipped.
 float lifted_ceiling(int index) {
 	float ceiling = cloud_layers.layers[index].cloud_ceiling;
 	return max(ceiling, min(ceiling + max(heightmap.terrain_top - cloud_layers.layers[index].cloud_floor, 0.0), heightmap.reach_top));
@@ -150,18 +138,16 @@ float lifted_ceiling(int index) {
 #define LAYER_CEILING(index) cloud_layers.layers[index].cloud_ceiling
 #endif
 
-// Cloud density (0..1) of one layer at p (at height, planet_height(p)), inside it, with
-// added_coverage (the effectors') on its coverage. apply_curl warps p by the curl noise (view
-// samples only, as SunshineClouds2).
+// Cloud density (0..1) of one layer at p inside it (height = planet_height(p)), with the effectors' added_coverage.
+// apply_curl warps p by the curl noise (view samples only, as SunshineClouds2).
 float sample_layer_density(vec3 p, float height, int index, bool apply_curl, float added_coverage, out float dimensional_profile, out float height_fraction,
 		out float coverage) {
 	CloudLayer layer = cloud_layers.layers[index];
 	height_fraction = clamp((height - layer.cloud_floor) / (layer.cloud_ceiling - layer.cloud_floor), 0.0, 1.0);
 	vec2 profile_uv = vec2((height_fraction * (profile_size.x - 1.0) + 0.5) / profile_size.x, (float(index) + 0.5) / profile_size.y);
 	vec4 profile = textureLod(profile_texture, profile_uv, 0.0);
-	// cloud_coverage pushes the coverage noise: 1 = full, 0.5 = the noise as is, 0 = none.
-	// coverage_noise_strength fills its gaps towards a uniform cloud_coverage, so at 1 the noise
-	// isn't sampled.
+	// cloud_coverage pushes the coverage noise: 1 = full, 0.5 = noise as is, 0 = none. coverage_noise_strength blends
+	// towards a uniform cloud_coverage; at 1 the noise isn't sampled.
 	coverage = layer.cloud_coverage;
 	if (layer.coverage_noise_strength != 1.0) {
 		float coverage_noise = textureLod(coverage_texture, (p.xz - layer.coverage_noise_offset) / layer.coverage_noise_scale, 0.0).r;
@@ -181,11 +167,10 @@ float sample_layer_density(vec3 p, float height, int index, bool apply_curl, flo
 	}
 	float cloud_noise_composite = textureLod(noise_texture, (p - layer.noise_offset) / layer.noise_scale, 0.0).r;
 	float threshold = 1.0 - dimensional_profile;
-	// Detail noise: the composite at the detail scale, centred on its mean and scaled by its
-	// deviation, applied before the cut so it reshapes the surface. detail_power masks it by the
-	// primary noise: shape is 0 at the base surface and 1 in the puffs' cores, so at 1 the detail
-	// keeps to the soft, low noise spans between puffs, at 0 it's everywhere. The mask is at most
-	// 1, so detail_reach still bounds it.
+	// Detail noise: the composite at detail scale, centred on its mean and scaled by its deviation, applied before
+	// the cut so it reshapes the surface. detail_power masks it by shape (0 at the base surface, 1 in puff cores):
+	// at 1 detail keeps to the soft spans between puffs, at 0 it's everywhere. The mask is <= 1, so detail_reach
+	// still bounds it.
 	float detail_strength = layer.detail_strength * profile.g;
 	float detail_reach = detail_strength * (1.0 - params.noise_mean) / params.noise_deviation * dimensional_profile;
 	if (cloud_noise_composite + detail_reach <= threshold) {
@@ -193,8 +178,7 @@ float sample_layer_density(vec3 p, float height, int index, bool apply_curl, flo
 	}
 	float shape = clamp((cloud_noise_composite - threshold) / dimensional_profile, 0.0, 1.0);
 	float soft = 1.0 - shape;
-	// Not sampled where it's scaled to nothing: no detail strength (the layer's or its curve's at
-	// this height), or masked out by detail_power.
+	// Skipped where scaled to nothing (no detail strength, or masked out by detail_power).
 	float detail_amount = detail_strength / params.noise_deviation * dimensional_profile * mix(1.0, soft * soft, layer.detail_power);
 	if (detail_amount != 0.0) {
 		cloud_noise_composite += (textureLod(noise_texture, (p - layer.detail_noise_offset) / layer.detail_noise_scale, 0.0).r - params.noise_mean)
@@ -203,8 +187,7 @@ float sample_layer_density(vec3 p, float height, int index, bool apply_curl, flo
 	return clamp(cloud_noise_composite - threshold, 0.0, 1.0);
 }
 
-// Extinction (per metre) at p, summed over the layers containing it, with their dimensional
-// profile, height fraction and coverage weighted by extinction.
+// Extinction (per metre) at p summed over its layers; profile, height fraction and coverage are extinction-weighted.
 float sample_density(vec3 p, bool apply_curl, out float dimensional_profile, out float height_fraction, out float coverage) {
 	float total = 0.0;
 	dimensional_profile = 0.0;
@@ -258,7 +241,7 @@ float henyey_greenstein(float cos_angle, float g) {
 	float num = 1.0 - g * g;
 	float denom = 1.0 + g * g - 2.0 * g * cos_angle;
 	float rsqrt_denom = inversesqrt(denom);
-	return num * rsqrt_denom * rsqrt_denom * rsqrt_denom * (1.0 / (4.0 * 3.14159265359)); // Pi: normalises the phase function over the sphere. Fixed, not tunable.
+	return num * rsqrt_denom * rsqrt_denom * rsqrt_denom * (1.0 / (4.0 * 3.14159265359)); // 1 / (4 pi): normalises over the sphere.
 }
 
 // E2(x): the average of exp(-x / cos) over a hemisphere, within ~5%.
@@ -268,10 +251,9 @@ float hemisphere_transmittance(float x) {
 
 const vec2 NO_SPAN = vec2(1e30, -1.0);
 
-// Clips a ray to the layer between heights floor_h and ceiling_h (as planet_height()), and to
-// max_distance: (enter, exit) of each stretch inside it, NO_SPAN for none. Flat, the layer is a slab
-// (one stretch); on a spherical planet a shell, which a ray dipping into the sphere below it
-// crosses twice (second). False when there's no stretch.
+// Clips a ray to the layer between heights floor_h and ceiling_h (as planet_height()) and max_distance: (enter, exit)
+// per stretch, NO_SPAN for none. Flat it's a slab (one stretch); spherical it's a shell, which a ray dipping into the
+// sphere below crosses twice (second). False when there's none.
 bool clip_to_layer(vec3 ray_origin, vec3 ray_direction, float floor_h, float ceiling_h, float max_distance, out vec2 first, out vec2 second) {
 	second = NO_SPAN;
 	if (!spherical_planet()) {
@@ -314,8 +296,8 @@ bool clip_to_layer(vec3 ray_origin, vec3 ray_direction, float floor_h, float cei
 	return first.y > first.x;
 }
 
-// How far a ray goes before hitting a spherical planet's surface (1e30 when it doesn't, or the
-// planet is flat, or the ray starts below it): the scene's terrain may not cover the curved ground.
+// Distance to a spherical planet's surface (1e30 if missed, flat, or starting below it): scene terrain may not cover
+// the curved ground.
 float planet_surface_distance(vec3 ray_origin, vec3 ray_direction) {
 	float t0;
 	float t1;
@@ -325,9 +307,8 @@ float planet_surface_distance(vec3 ray_origin, vec3 ray_direction) {
 	return 1e30;
 }
 
-// Transmittance from p towards a light up to max_distance through the layers: steps samples, growing
-// from first_step, no curl. On a spherical planet only the layers' first stretch: a light ray
-// dipping back into them has gone below the horizon.
+// Transmittance from p towards a light through the layers, up to max_distance: steps samples growing from first_step,
+// no curl. Spherical: first stretch only, since a light ray dipping back in has gone below the horizon.
 float light_transmittance(vec3 p, vec3 direction, float max_distance, float layers_floor, float layers_ceiling, float jitter, int steps, float first_step) {
 	vec2 span;
 	vec2 unused_span;
@@ -357,17 +338,15 @@ float light_transmittance(vec3 p, vec3 direction, float max_distance, float laye
 	return exp(-optical_depth);
 }
 
-// Ambient at a cloud sample, as a fraction of the sky's: x = from the sky (ambient_color), y = from
-// the ground (ground_color). Density-aware (Hillaire 2016): isotropic light from the sky above and
-// the ground below, each through the cloud between the sample and the top or bottom of the layers
-// holding it at the sample's own extinction. The profile ambient is all sky.
+// Ambient at a cloud sample as a fraction of the sky's: x = sky (ambient_color), y = ground (ground_color).
+// Density-aware (Hillaire 2016): isotropic sky and ground light through the cloud between the sample and the top or
+// bottom of its layers, at the sample's extinction. The profile ambient is all sky.
 vec2 cloud_ambient(vec3 p, float extinction, float dimensional_profile) {
 	vec2 ambient_scattering = vec2(pow(1.0 - dimensional_profile, 0.5), 0.0);
 	if (params.ambient_occlusion > 0.0) {
 		float height = planet_height(p);
 #ifdef HEIGHTMAP
-		// Each layer holding p lifted as sample_density() found it (terrain is p's, from that call):
-		// the distances to its top and bottom in its own lifted heights.
+		// Distances to each containing layer's top and bottom, in lifted heights (terrain is from sample_density(p)).
 		float above = 0.0;
 		float below = 0.0;
 		for (int l = 0; l < LAYER_COUNT; l++) {
@@ -405,14 +384,12 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(constant_id = 1) const uint INTERLACE_PASS_U = 0u;
 #define INTERLACE_PASS int(INTERLACE_PASS_U)
 
-// x = light absorption (texels interlacing doesn't trace hold the reprojected history, with
-// -absorption - 1), yzw = direct light.
+// x = light absorption (untraced interlace texels hold reprojected history as -absorption - 1), yzw = direct light.
 layout(rgba16f, set = 0, binding = 8) uniform restrict writeonly image2D current_image;
-// x = sky ambient intensity, y = absorption weighted cloud distance (km), z = ground ambient
-// intensity.
+// x = sky ambient intensity, y = absorption-weighted cloud distance (km), z = ground ambient intensity.
 layout(rgba16f, set = 0, binding = 27) uniform restrict writeonly image2D current_b_image;
-// The previous frame's resolve output: as above, and r = scene distance (km), g = sky ambient
-// intensity, b = weighted cloud distance, a = ground ambient intensity.
+// Previous frame's resolve output: as above; b's r = scene distance (km), g = sky ambient, b = weighted cloud
+// distance, a = ground ambient.
 layout(set = 0, binding = 16) uniform sampler2D history_texture;
 layout(set = 0, binding = 17) uniform sampler2D history_b_texture;
 
@@ -435,7 +412,7 @@ void main() {
 		int block_height = count / block_width;
 		int k = (id.y % block_height) * block_width + id.x % block_width;
 		int first = int(params.frame % uint(params.interlace)) * per_tile;
-		int position = int[16](0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12)[traced ? first + k : (k < first ? k : k + per_tile)]; // 4x4 Bayer order of tile texels, so each interlace pass spreads evenly. Fixed pattern, not tunable.
+		int position = int[16](0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12)[traced ? first + k : (k < first ? k : k + per_tile)]; // 4x4 Bayer order, so each interlace pass spreads evenly.
 		texel = id / ivec2(block_width, block_height) * 4 + ivec2(position & 3, position >> 2);
 	}
 	if (any(greaterThanEqual(texel, raymarch_size()))) {
@@ -449,9 +426,9 @@ void main() {
 	camera_ray(pixel, ray_origin, ray_direction, max_distance);
 
 	if (INTERLACE_PASS == 2) {
-		// The history at this pixel's cloud, its distance refined once at the reprojected position.
-		// Traced after all when that lands off screen, when opaque scene is now in front of the
-		// cloud, or when the scene was nearer there last frame (unless the cloud hid it).
+		// History at this pixel's cloud, its distance refined once at the reprojected position. Traced instead if that
+		// lands off screen, opaque scene is now in front of the cloud, or the scene was nearer there last frame (unless
+		// the cloud hid it).
 		vec2 prev_uv = (vec2(pixel) + 0.5) / vec2(params.screen_size);
 		vec4 history = textureLod(history_texture, prev_uv, 0.0);
 		vec4 history_b = textureLod(history_b_texture, prev_uv, 0.0);
@@ -478,9 +455,8 @@ void main() {
 
 	vec2 jitter = vec2(pcg3d(uvec3(uvec2(pixel), params.frame)).xy) * (1.0 / 4294967296.0);
 	max_distance = min(max_distance, planet_surface_distance(ray_origin, ray_direction));
-	// Each layer's stretches of the ray (two per layer, for a spherical planet's shells; enter > exit
-	// where it misses). LAYER_COUNT is constant, so these loops unroll and the arrays stay in
-	// registers.
+	// Each layer's ray stretches (two per layer for spherical shells; enter > exit on a miss). LAYER_COUNT is constant,
+	// so these loops unroll and the arrays stay in registers.
 	float layer_enter[MAX_LAYERS * 2];
 	float layer_exit[MAX_LAYERS * 2];
 	float layers_floor = 1e30;
@@ -503,7 +479,6 @@ void main() {
 		}
 	}
 
-	// The directional lights' phases along this ray.
 	float primary_phase[MAX_DIRECTIONAL_LIGHTS];
 	float secondary_phase[MAX_DIRECTIONAL_LIGHTS];
 	for (int i = 0; i < lights.directional_count; i++) {
@@ -511,8 +486,7 @@ void main() {
 		primary_phase[i] = henyey_greenstein(cos_angle, params.primary_phase_g);
 		secondary_phase[i] = henyey_greenstein(cos_angle, params.secondary_phase_g);
 	}
-	// The omni lights and effectors (together, the effectors following the omni lights) whose range
-	// the ray's span through the layers passes through.
+	// Omni lights and effectors (effectors after omni lights) whose range the ray's span through the layers crosses.
 	uint omni_bits = point_bits(0, lights.omni_count);
 	uint along = points_along(ray_origin, ray_direction, t, t_end, 0, lights.omni_count + lights.effector_count);
 	uint omni_mask = along & omni_bits;
@@ -573,10 +547,9 @@ void main() {
 		}
 		empty_samples = 0;
 
-		// Direct light: (transmittance towards the light * primary phase) + (multiple scattering *
-		// secondary phase) per light. The directional lights' radiance after the atmosphere is taken
-		// per sample: with a low sun it changes a lot with altitude, and one value per ray (say at
-		// its first cloud sample, possibly a wisp in the planet's shadow) darkens whole rays.
+		// Direct light per light: transmittance * primary phase + multiple scattering * secondary phase. Atmosphere
+		// transmittance is per sample: with a low sun it changes a lot with altitude, and one value per ray can darken
+		// whole rays (e.g. taken at a wisp in the planet's shadow).
 		vec3 point = atmosphere_position(p);
 		float r = length(point);
 		float ms_shape = clamp((dimensional_profile * step_size - 0.1) / 0.9, 0.0, 1.0) * pow(coverage, 0.25)
@@ -636,9 +609,8 @@ void main() {
 #endif
 
 #ifdef SHADOW_MAP
-// Every texel is a line along the sun; it stores the sunlight getting through the layers along
-// it. The map repeats every extent (as the projector does), so each texel takes the copy of its
-// line nearest the camera.
+// Each texel is a line along the sun, storing the sunlight through the layers along it. The map repeats every extent
+// (as the projector does), so each texel takes its line's copy nearest the camera.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(rgba16f, set = 0, binding = 21) uniform restrict writeonly image2D shadow_map;
@@ -657,9 +629,9 @@ void main() {
 	vec3 line_point = (shadow.light_to_world * vec4(light_xy, shadow.camera_light.z, 1.0)).xyz;
 	vec3 sun_direction = normalize(shadow.light_to_world[2].xyz);
 
-	// Optical depth from where the line enters the lowest floor, and from 1/3 and 2/3 of the way
-	// (for points inside or above the layers). Each sample's extinction, relative to the densest
-	// layer's density, is raised to the sharpness and scaled by the strength.
+	// Optical depth from where the line enters the lowest floor, and from 1/3 and 2/3 along (for points inside or
+	// above the layers). Each sample's extinction, relative to the densest layer's, is raised to sharpness and scaled
+	// by strength.
 	vec3 optical_depth = vec3(0.0);
 	float reference_density = 0.0;
 	for (int l = 0; l < LAYER_COUNT; l++) {
@@ -713,9 +685,8 @@ void main() {
 #endif
 
 #ifdef SKYBOX
-// The skybox (SunshineClouds3.gd's skybox_enabled): the atmosphere, the background and a coarse
-// march of the clouds from the camera, as an equirectangular panorama in Godot's SKY_COORDS layout,
-// which SunshineClouds3Driver draws its WorldEnvironment's sky with (reflections and ambient light).
+// Skybox (SunshineClouds3.gd's skybox_enabled): atmosphere, background and a coarse cloud march from the camera, as an
+// equirectangular panorama in Godot's SKY_COORDS layout. SunshineClouds3Driver's WorldEnvironment sky draws it.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "atmosphere/AtmosphereHeader.glslinc"
@@ -730,9 +701,9 @@ layout(set = 0, binding = 12) uniform sampler2D irradiance_texture;
 
 layout(rgba16f, set = 0, binding = 31) uniform restrict writeonly image2D skybox_image;
 
-// The planet's ground below the horizon (sky_settings.skybox_ground_albedo, lit by the atmosphere's
-// lights and the sky) seen from camera (atmosphere position) along view, with the air in front of
-// it. The sky's light on it and the air's are times atmosphere_tint.
+// Planet ground below the horizon (sky_settings.skybox_ground_albedo, lit by the atmosphere's lights and sky) seen
+// from camera (atmosphere position) along view, with the air in front. Sky light on it and the air's are times
+// atmosphere_tint.
 vec3 ground_radiance(AtmosphereParameters atmosphere, vec3 camera, vec3 view) {
 	float r = length(camera);
 	float rmu = dot(camera, view);
@@ -754,11 +725,9 @@ vec3 ground_radiance(AtmosphereParameters atmosphere, vec3 camera, vec3 view) {
 			+ (in_scatter + glow) * sky_settings.atmosphere_tint;
 }
 
-// The clouds along direction from ray_origin, far coarser than the view raymarch: skybox_cloud_steps
-// even steps through the layers up to skybox_cloud_distance, skybox_cloud_light_steps towards each
-// directional light, no curl and no omni lights. Returns their light absorption; cloud_light is the
-// light they send back (direct, and ambient as the resolve adds it) and distance_to_cloud their
-// absorption weighted distance (m).
+// Clouds along direction, much coarser than the view raymarch: skybox_cloud_steps even steps up to
+// skybox_cloud_distance, skybox_cloud_light_steps per directional light, no curl or omni lights. Returns absorption;
+// cloud_light = light sent back (direct + ambient as the resolve adds it); distance_to_cloud: absorption-weighted (m).
 float skybox_clouds(vec3 ray_origin, vec3 direction, float jitter, out vec3 cloud_light, out float distance_to_cloud) {
 	cloud_light = vec3(0.0);
 	distance_to_cloud = 0.0;
@@ -871,8 +840,8 @@ void main() {
 		radiance = sky_radiance(ray_origin, direction, 0.0, transmittance, unused_disc, through) * params.radiance_scale;
 		radiance += background_radiance(direction, PI / float(size.y), transmittance, radiance, through) * sky_settings.background_skybox_energy;
 	}
-	// The clouds over it, composited as the resolve does (a fixed jitter per texel: the skybox isn't
-	// accumulated, and filtering it into reflections smooths the noise).
+	// Clouds over it, composited as the resolve does. Fixed jitter per texel: the skybox isn't accumulated, and
+	// filtering it into reflections smooths the noise.
 	vec3 cloud_light;
 	float distance_to_cloud;
 	float jitter = float(pcg3d(uvec3(uvec2(texel), 0u)).x) * (1.0 / 4294967296.0);
@@ -911,12 +880,11 @@ void main() {
 #endif
 
 #ifdef SAMPLE_POINTS
-// xyz in, w out: the cloud density (0..1) summed over the layers containing the point, before
-// each layer's density scales it.
+// xyz in, w out: cloud density (0..1) summed over the point's layers, before each layer's density scale.
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 22, std430) restrict buffer SamplePointsBuffer {
-	vec4 sample_points[32]; // Sample point count: must match SunshineClouds3.gd's MAX_SAMPLE_POINTS and fit the 32 wide workgroup. 1-32.
+	vec4 sample_points[32]; // Must match SunshineClouds3.gd's MAX_SAMPLE_POINTS and fit the 32-wide workgroup.
 };
 
 layout(push_constant, std430) uniform SampleConstants {

@@ -3,9 +3,8 @@ render_mode blend_disabled;
 
 uniform sampler2D source_texture0 : hint_blit_source0;
 
-// MODULATE (SunshineClouds3.gd's blit_params): rg = the shift into the map (which repeats) in texels
-// over its resolution, b = where the edge fade starts (fraction of the way out to the edge), a = 1
-// when the light has repeat off and its window is centred over the camera (else the map as it is).
+// MODULATE (SunshineClouds3.gd's blit_params): rg = shift into the repeating map (texels / resolution), b = edge fade
+// start (fraction of the way out), a = 1: window centred over the camera (light repeat off), else the map as is.
 void blit() {
 	ivec2 resolution = textureSize(source_texture0, 0);
 	ivec2 texel = ivec2(UV * vec2(resolution));

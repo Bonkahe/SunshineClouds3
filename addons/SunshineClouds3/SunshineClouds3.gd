@@ -20,10 +20,8 @@ const MAX_SAMPLE_POINTS := 32
 const SAMPLE_BUFFER_BYTES := MAX_SAMPLE_POINTS * 16
 const SHADOW_BYTES := 208
 const PARAMS_BYTES := 512
-## Lights further below the horizon than this (the cosine of their angle to the vertical) light none
-## of the atmosphere and are left out of it: Bruneton's mu_s_min (102 degrees, the end of twilight;
-## see the atmosphere's encoding), less 0.03 for points up to some 200 km from the camera, where the
-## vertical has tilted.
+## Cosine to the vertical below which a light is left out of the atmosphere: Bruneton's mu_s_min
+## (102 degrees, end of twilight) less 0.03 for points up to ~200 km away, where the vertical has tilted.
 const ATMOSPHERE_LIGHT_MIN_MU := -0.238
 ## Meta a SunshineClouds3Driver sets on a directional light it hid below the horizon (see
 ## CloudDirectionalLightSettings.drive_light_color): the clouds and the atmosphere keep it as shown.
@@ -106,14 +104,12 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## Scales every omni light's energy on the clouds.
 @export_range(0.0, 10.0, 0.01, "or_greater") var omni_energy_multiplier : float = 10.0
 
-## Henyey-Greenstein g of the direct light (light that reached the sample through the cloud).
-## Higher concentrates it forward: bright silver linings looking towards the light, darker looking
-## away. 0.3-0.8 suits clouds.
+## Henyey-Greenstein g of the direct light. Higher concentrates it forward: brighter silver linings
+## towards the light, darker away. 0.3-0.8 suits clouds.
 @export_range(0.01, 0.99, 0.01) var primary_phase_g : float = 0.08
 
-## Henyey-Greenstein g of the multiple scattering term (the ms_volume glow inside the cloud).
-## Bounced light has lost its direction, so keep it low: 0.0-0.3, near even in every direction,
-## lights the side facing away from the light.
+## Henyey-Greenstein g of the multiple scattering glow (ms_volume). Bounced light has lost its
+## direction, so keep it low (0.0-0.3); this lights the side facing away from the light.
 @export_range(0.01, 0.99, 0.01) var secondary_phase_g : float = 0.36
 
 ## ms_volume *= pow(attenuated_light, multiple_scattering_depth_power).
@@ -126,25 +122,21 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 @export_range(-180.0, 180.0, 0.1, "degrees") var fallback_light_azimuth : float = 30.0
 @export var fallback_light_color : Color = Color.WHITE
 @export_range(0.0, 16.0, 0.01, "or_greater") var fallback_light_energy : float = 1.0
-## Forgets the last directional lights a driver gave, so the fallback light is used until one gives
-## some again.
+## Forgets the last directional lights a driver gave; the fallback light is used until a driver gives more.
 @export_tool_button("Forget Last Lights", "Clear") var forget_last_lights_action = forget_last_lights
 
 @export_group("Ambient Scattering")
 
 @export var ambient_color : Color = Color(1.0, 0.3889187, 0.2613985)
-## Colour of the ground bounce, the density-aware ambient's light from below (ambient_color is the
-## sky's from above).
+## Ground bounce colour: the density-aware ambient's light from below (ambient_color is from above).
 @export var ground_color : Color = Color(1.0, 0.3889187, 0.2613985)
 @export_range(0.0, 10.0, 0.01, "or_greater") var ambient_energy : float = 1.0
-## 0: the ambient light follows the layer's profile only, so dark sides come out flat. 1:
-## density-aware, sky light from above and ground light from below dimmed through the cloud, so
-## dense cores darken and wisps stay lit.
+## 0: ambient follows the layer profile only (flat dark sides). 1: density-aware, sky and ground
+## light dimmed through the cloud, so dense cores darken and wisps stay lit.
 @export_range(0.0, 1.0, 0.01) var ambient_occlusion : float = 0.99
 ## Light from below as a fraction of the sky light from above, for the density-aware ambient.
 @export_range(0.0, 2.0, 0.01, "or_greater") var ambient_ground_strength : float = 0.92
-## Scales the extinction the density-aware ambient is occluded by: lower lets it reach further
-## into the cloud.
+## Scales the density-aware ambient's occluding extinction: lower reaches further into the cloud.
 @export_range(0.0, 1.0, 0.0001, "or_greater") var ambient_extinction_scale : float = 0.1861
 
 
@@ -152,20 +144,18 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 
 @export var atmosphere_enabled : bool = true
 
-## The air in the scene's shadow gives none of the glow around a light: no halo over a hill or
-## building hiding the sun (or moon), with the air in front of it in its shadow. Worked out from the
-## depth buffer on screen, so a light off screen (or behind the camera) is shadowed only by what's
-## on screen. Costs a few depth reads a pixel per light.
+## Air in the scene's shadow gives no glow around a light (no halo over a hill hiding the sun).
+## Uses the screen depth buffer, so only on-screen geometry shadows. Costs a few depth reads per
+## pixel per light.
 @export var atmosphere_glow_shadows : bool = true
 
-## Multiplies the atmosphere's own light: the sky (not the sun's disc), the haze over the scene and
-## in front of the clouds, and the sky light on the clouds and the skybox's ground.
+## Multiplies the atmosphere's own light: sky (not the sun disc), haze, and sky light on the clouds
+## and skybox ground.
 @export_color_no_alpha var atmosphere_tint : Color = Color.WHITE
 
-## Scene units per unit of the precomputed atmosphere's light: scales all of it (the sky, the discs,
-## the haze, the sky light on the clouds) and the directional lights on the clouds alike. Each
-## directional light lights the atmosphere on top of it by its own colour * energy (see set_lights()):
-## a light at an energy of 1 is the atmosphere's sun, one at 0.1 a tenth of its sky, glow and disc.
+## Scene units per unit of precomputed atmosphere light; scales the sky, discs, haze and the
+## directional lights on the clouds alike. Each directional light also scales the atmosphere by its
+## colour * energy (see set_lights()): energy 1 is the atmosphere's sun, 0.1 a tenth of it.
 @export_range(0.0, 100.0, 0.01, "or_greater") var radiance_scale : float = 1.0
 ## World Y of the planet surface.
 @export var ground_height : float = 0.0
@@ -215,9 +205,8 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 	set(value):
 		ozone = value
 		atmosphere_changed = true
-## Angular radius of every directional light's disc in the sky. A disc is as bright as its light's
-## energy (and colour) makes it, and below an energy of 1 covers the background behind it only that
-## much: a dim moon's disc lets a moon on background_texture show through it.
+## Angular radius of every directional light's sky disc. Below energy 1 a disc only partly covers
+## the background, so a dim moon's disc lets a moon on background_texture show through.
 @export_range(0.0001, 0.1, 0.0001, "suffix:rad") var sun_angular_radius : float = 0.0156:
 	set(value):
 		sun_angular_radius = value
@@ -228,11 +217,10 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 		atmosphere_changed = true
 
 @export_group("Spherical Planet Settings")
-## Curves the cloud layers, the atmosphere and the cloud shadows around a sphere of planet_radius
-## at planet_center: their heights become altitudes above its surface (ground_height is unused).
-## Off, they're flat along world Y, as around a planet at (0, -planet_radius, 0).
-## There are incompatablities with this feature, this stops coverage noise from working, as that is still in world space xy, recommended you disable that if you enable this feature.
-## It also stops the driving of the directional light color from being accurate as well, as when the sun is on the other side of the planet from you, it will be red when it should still be white (Or whatever you have it set to).
+## Curves the cloud layers, atmosphere and cloud shadows around a sphere of planet_radius at
+## planet_center; heights become altitudes (ground_height is unused). Off: flat along world Y.
+## Breaks coverage noise (still in flat world space), so disable that with this on. Driven light colour is
+## also wrong when the sun is on the far side of the planet (red instead of its set colour).
 @export var spherical_planet : bool = false
 ## World position of the planet's centre, with spherical_planet.
 @export var planet_center : Vector3 = Vector3(0.0, -6360000.0, 0.0)
@@ -240,46 +228,43 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 @export_group("Quality")
 ## Step size at the camera: near_step_size + far_step_size_offset * distance / step_adjustment_distance.
 @export_range(0.1, 100.0, 0.1, "or_greater") var near_step_size : float = 3.0
-## Step size added to the near step size at the maximum distance.
+## Step size added to near_step_size at step_adjustment_distance.
 @export_range(0.0, 1000.0, 0.1, "or_greater") var far_step_size_offset : float = 100.0
-## Used to modulate the point at which far_step_size_offset is fully used.
+## Distance at which far_step_size_offset is fully applied.
 @export_range(1.0, 100000.0, 1.0, "or_greater") var step_adjustment_distance : float = 6000.0
-## View step size once a ray has found cloud. Lower values get better visuals overall (less noise specifically), but it does have some performance cost and also sometimes introduces a bit of banding on the clouds.
+## View step size once a ray has found cloud. Lower is less noisy but costs performance and can band.
 @export_range(1.0, 1000.0, 0.1, "or_greater") var cloud_step_size : float = 10.0
 ## Samples in a row that find no cloud before the view ray goes back to coarse steps.
 @export_range(1, 64) var cloud_exit_steps : int = 10
-## In short, it renders a small subset of pixels based on this setting, the rest just reproject during interem frames.
+## Renders a subset of pixels each frame; the rest reproject in between.
 @export_enum("Off:1", "Half:2", "Quarter:4", "Eighth:8") var interlace : int = 2
-## Maximum number of raymarch steps used, the base for performance is usually controlled by this.
+## Maximum raymarch steps; usually the main performance control.
 @export_range(1, 4096) var max_steps : int = 600
-## Total distance used to sample the lighting in.
+## Total distance the lighting is sampled over.
 @export_range(1.0, 100000.0, 1.0, "or_greater") var light_march_distance : float = 2000.0
 ## Each light step is this much longer than the previous one. 1 = even steps.
 @export_range(1.0, 3.0, 0.01) var light_step_growth : float = 2.15
 ## Maximum distance used for the clouds.
 @export_range(100.0, 200000.0, 1.0, "or_greater") var max_distance : float = 150000.0
-## The raymarch traces one random pixel per N x N block each frame; the resolve reconstructs and
-## accumulates at full resolution.
+## Traces one random pixel per N x N block each frame; the resolve reconstructs at full resolution.
 @export_enum("Full:1", "Half:2", "Quarter:4") var raymarch_resolution : int = 2
 
 @export_group("Accumulation")
 ## Weight of the new frame when blending with the history. 1 = no accumulation.
 @export_range(0.001, 1.0, 0.001) var current_frame_weight : float = 0.1
-## Nearer than this, the history isn't moved with the wind (fading in linearly from the camera):
-## there a frame's wind is a large screen jump that ghosts across silhouettes.
+## Within this distance the history isn't moved with the wind (fading in linearly): up close the
+## wind's screen jump ghosts across silhouettes.
 @export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var wind_reprojection_distance : float = 500.0
 
 @export_group("Cloud Shadows")
-## Generates cloud shadow textures and applies them to the directional light strongest in the scene, if the projectors are available.
-## There is a PR open currently to implement this support, available here: https://github.com/godotengine/godot/pull/106294 you will have to build a version yourself.
+## Renders cloud shadows onto the strongest directional light.
 @export var cloud_shadows : bool = true
-## Light Projector: SunshineClouds3Driver puts the map on its directional light as a projector
-## (needs an engine build with directional light projectors and the light casting shadows). Screen
-## Space: the resolve darkens opaque surfaces instead, ambient light included. Light Projector
-## falls back to Screen Space when the projector isn't available.
+## Light Projector: the driver puts the map on its directional light as a projector (needs the light
+## casting shadows and an engine build with https://github.com/godotengine/godot/pull/106294).
+## Screen Space: the resolve darkens opaque surfaces, ambient included; also the projector fallback.
 @export_enum("Light Projector:0", "Screen Space:1") var cloud_shadow_mode : int = SHADOW_MODE_PROJECTOR
 @export_enum("512:512", "1024:1024", "2048:2048") var cloud_shadow_resolution : int = 512
-## Width of the area the shadows cover, centred on the camera (times cloud_scale).
+## Width of the shadowed area, centred on the camera (times cloud_scale).
 @export_range(1000.0, 512000.0, 100.0, "or_greater", "suffix:m") var cloud_shadow_extent : float = 80000.0
 @export_range(1, 64) var cloud_shadow_steps : int = 32
 @export_range(0.0, 1.0, 0.001, "or_greater") var cloud_shadow_strength : float = 0.549
@@ -288,86 +273,74 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## Frames between shadow map renders, blended from one to the next in between (1 = every frame).
 ## Higher saves GPU time; the shadows then trail the clouds by about this many frames.
 @export_range(1, 128) var cloud_shadow_update_interval : int = 12
-## Where the shadows start fading out towards the edge of the area they cover (cloud_shadow_extent,
-## centred on the camera), as a fraction of the way out: 1 = no fade, the shadows end at the edge.
+## Fraction of the way to the edge of cloud_shadow_extent where shadows start fading. 1 = no fade.
 @export_range(0.0, 1.0, 0.01) var cloud_shadow_edge_fade : float = 0.7
 @export_subgroup("Screen Space")
 @export_range(0.0, 1.0, 0.01) var screen_space_shadow_strength : float = 0.6
 
 @export_group("Background")
-## An equirectangular panorama behind the atmosphere (laid out as PanoramaSkyMaterial's): stars and
-## the like. It's seen through the air to space and behind the clouds, and fades out where the sky
-## in front of it is bright. Its colours are light in scene units, times background_color and
+## Equirectangular panorama (as PanoramaSkyMaterial) behind the atmosphere and clouds, e.g. stars.
+## Fades where the sky in front is bright. Colours are scene-unit light times background_color and
 ## background_energy. Needs atmosphere_enabled.
 @export var background_texture : Texture2D
 @export var background_color : Color = Color.WHITE
 @export_range(0.0, 16.0, 0.001, "or_greater") var background_energy : float = 1.0
-## Sky brightness (luminance, scene units) that dims the background to about a third: it fades in
-## as the sky darkens, first on the side away from the sun. At a radiance_scale of 1 a clear midday
-## zenith is about 0.06, and the sky away from a sun 3 degrees below the horizon about 0.0005.
+## Sky luminance (scene units) that dims the background to about a third. At radiance_scale 1 a
+## clear midday zenith is ~0.06, the sky away from a sun 3 degrees below the horizon ~0.0005.
 ## 0 = never fades.
 @export_range(0.0, 0.1, 0.0001, "or_greater") var background_fade_brightness : float = 0.002
-## Rotates the background (Euler angles in degrees, as Environment.sky_rotation): turn it to move
-## the stars through the night.
+## Background rotation (Euler degrees, as Environment.sky_rotation); animate to move the stars.
 @export var background_rotation : Vector3 = Vector3.ZERO
-## Scales the background in the skybox (reflections and ambient light) on top of
-## background_energy; the clouds' own sky on screen is unaffected.
+## Scales the background in the skybox only (reflections and ambient), on top of background_energy.
 @export_range(0.0, 16.0, 0.001, "or_greater") var background_skybox_energy : float = 1.0
 
 @export_group("Skybox")
-## Renders the atmosphere, the background and a coarse march of the clouds into a low resolution
-## panorama, the skybox, which a SunshineClouds3Driver with a world_environment draws that
-## environment's sky with (in the editor too): the scene's reflections and ambient light then follow
-## the atmosphere. Needs atmosphere_enabled.
+## Renders the atmosphere, background and a coarse cloud march into a low resolution panorama that a
+## SunshineClouds3Driver with a world_environment uses as its sky (editor too), so reflections and
+## ambient light follow the atmosphere. Needs atmosphere_enabled.
 @export var skybox_enabled : bool = true
-## Width of the panorama (its height is half of it).
+## Panorama width (height is half).
 @export_enum("64:64", "128:128", "256:256", "512:512", "1024:1024") var skybox_resolution : int = 64
-## The Sky's radiance_size: the resolution Godot filters the reflections and ambient light at.
+## The Sky's radiance_size: the resolution Godot filters reflections and ambient light at.
 @export_enum("32:0", "64:1", "128:2", "256:3", "512:4") var skybox_radiance_size : int = Sky.RADIANCE_SIZE_32
-## Frames between panorama renders, blended from one to the next in between (1 = every frame), as
-## cloud_shadow_update_interval. It renders again at once when the sun, the camera height or the
-## settings jump.
+## Frames between panorama renders, blended in between (1 = every frame). Re-renders at once when
+## the sun, camera height or settings jump.
 @export_range(1, 128) var skybox_update_interval : int = 32
-## Albedo of the ground below the horizon in the panorama, lit by the sun and the sky.
+## Albedo of the panorama's ground below the horizon.
 @export var skybox_ground_color : Color = Color(0.1875, 0.17620538, 0.13044626)
-## Scales the whole skybox's brightness, and so the reflections and ambient light it gives (the
-## clouds' own sky on screen is unaffected).
+## Scales the skybox's brightness, and so its reflections and ambient (not the on-screen sky).
 @export_range(0.0, 4.0, 0.01, "or_greater") var skybox_energy : float = 1.0
-## How much the clouds' coverage and density darken the whole skybox (and so the reflections and
-## ambient light): its radiance is scaled by 1 - this * (coverage + density) / 2, from Base
-## Settings. 0 = not at all.
+## How much coverage and density darken the skybox: radiance *= 1 - this * (coverage + density) / 2.
+## 0 = not at all.
 @export_range(0.0, 1.0, 0.01) var skybox_cloud_dimming : float = 0.0
 ## Renders the skybox from world Y skybox_height (at the camera's X and Z) instead of from the camera.
 @export var skybox_fixed_height : bool = false
-## The world Y the skybox is rendered from with skybox_fixed_height.
+## World Y the skybox is rendered from with skybox_fixed_height.
 @export var skybox_height : float = 0.0
 @export_subgroup("Clouds")
-## Marches the clouds into the skybox too, far coarser than on screen: even steps, no curl noise and
-## no omni lights. Off leaves the clear sky.
+## Marches the clouds into the skybox, far coarser than on screen: even steps, no curl noise or omni
+## lights. Off leaves a clear sky.
 @export var skybox_clouds : bool = true
-## Steps along each skybox ray through the layers, evenly spaced up to skybox_cloud_distance.
+## Even steps along each skybox ray up to skybox_cloud_distance.
 @export_range(1, 128) var skybox_cloud_steps : int = 4
-## Steps towards each directional light from every cloud sample (0 = lit through), over
-## light_march_distance growing by light_step_growth.
+## Light steps per cloud sample (0 = fully lit), over light_march_distance growing by light_step_growth.
 @export_range(0, 8) var skybox_cloud_light_steps : int = 2
 ## How far along a skybox ray the clouds are marched.
 @export_range(1000.0, 200000.0, 100.0, "or_greater", "suffix:m") var skybox_cloud_distance : float = 10000.0
 
 @export_group("Reflections")
-## Writes the frame's colour with the clouds in it, and how far away each pixel is, into one image
-## every frame, for screen-space reflection materials (Resources/Shaders/SunshineClouds3SSR.gdshader
-## is a basic one).
+## Writes the frame's colour (with clouds) and per-pixel distance into one image each frame, for
+## screen-space reflection materials (see Resources/Shaders/SunshineClouds3SSR.gdshader).
 @export var reflections_enabled : bool = false:
 	set(value):
 		reflections_enabled = value
 		_queue_reflection_update()
-## The global shader parameter (sampler2D) the image is set as.
+## Global shader parameter (sampler2D) the image is set as.
 @export var reflection_parameter : StringName = &"sunshine_clouds_reflection":
 	set(value):
 		reflection_parameter = value
 		_queue_reflection_update()
-## Adds reflection_parameter to Project Settings > Globals > Shader Globals (sampler2D), so
-## materials that read it compile whenever they load.
+## Adds reflection_parameter to Project Settings > Globals > Shader Globals, so materials reading it compile.
 @export_tool_button("Add To Project Shader Globals", "Add") var add_reflection_global_action = add_reflection_parameter_to_project
 
 @export_group("Terrain Heightmap")
@@ -385,19 +358,17 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 		if heightmap:
 			heightmap.changed.connect(_heightmap_changed)
 		heightmap_version += 1
-## X and Z: the world position of the heightmap's (0, 0) corner, the texture's outer edge (not its
-## first texel's centre); u runs along +X, v along +Z.
+## X and Z: world position of the texture's (0, 0) outer corner (not the first texel's centre);
+## u runs along +X, v along +Z.
 @export var heightmap_position : Vector3 = Vector3.ZERO
 ## The world size (m) the whole texture covers along X and Z.
 @export var heightmap_size : Vector2 = Vector2(10000.0, 10000.0)
 ## Metres of terrain height per texel value (1 for a texture holding metres).
 @export_range(0.0, 10000.0, 0.01, "or_greater", "suffix:m") var heightmap_height_scale : float = 1000.0
-## The most the terrain rises above heightmap_position.y (m); higher values are clamped to it. The
-## clouds' march bounds are widened by it so lifted clouds are found, so keep it close to the real
-## maximum. 0: heightmap_height_scale (a texture holding 0..1).
+## Max terrain rise above heightmap_position.y (m); higher is clamped. Widens the march bounds, so
+## keep it close to the real maximum. 0: heightmap_height_scale (a texture holding 0..1).
 @export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var heightmap_max_height : float = 0.0
-## Up to this height above the terrain the lift is full: a layer the terrain rises into moves up
-## with it one for one.
+## Up to this height above the terrain, layers are lifted one for one with it.
 @export_range(0.0, 10000.0, 1.0, "or_greater", "suffix:m") var heightmap_falloff_min : float = 500.0
 ## From this height above the terrain there's no lift; between the two it fades out smoothly.
 @export_range(0.0, 20000.0, 1.0, "or_greater", "suffix:m") var heightmap_falloff_max : float = 2000.0
@@ -446,44 +417,47 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 
 @export_group("Shaders")
 ## In the editor, reload the shaders when one of the addon's .glsl or .glslinc files changes.
-## Off by default: the check hashes every shader file once a second (~4.6 ms on the main thread).
+## Off by default: the check hashes every shader file once a second (~4.6 ms on the main thread, can lag out the editor, only leave it on when changing compute things).
 @export var auto_reload_shaders : bool = false
 ## Reimports and recompiles the shaders (the editor doesn't reimport the shaders including an
 ## edited .glslinc, and the clouds keep the shaders they compiled either way).
 @export_tool_button("Reload Shaders", "Reload") var reload_shaders_action = reload_shaders
 
+# Rendering device: every GPU resource below is created on it.
 var rd : RenderingDevice
+
+# Shaders: compute shaders for each pass, including the 3D MSAA variants.
 var shader : RID
 var resolve_shader : RID
-## The versions used with 3D MSAA.
 var raymarch_msaa_shader : RID
 var resolve_msaa_shader : RID
 var msaa_composite_shader : RID
-## The MSAA composite's render pipelines (multiply, add) by framebuffer format.
-var msaa_composite_pipelines := {}
 var shadow_shader : RID
 var shadow_blend_shader : RID
-var shadow_blend_pipeline : RID
 var skybox_shader : RID
 var skybox_blend_shader : RID
-var skybox_blend_pipeline : RID
 var sample_shader : RID
 var precompute_shaders : Array[RID] = []
-# Pipelines are created the first time they're needed (_pipeline()) and freed with their shader.
+
+# Pipelines: created on first use by _pipeline(); MSAA composite pipelines keyed by framebuffer format.
 var raymarch_pipelines : Array[RID] = []
 var resolve_pipelines : Array[RID] = []
 var shadow_pipelines : Array[RID] = []
 var skybox_pipelines : Array[RID] = []
 var sample_pipelines : Array[RID] = []
 var precompute_pipelines : Array[RID] = []
+var shadow_blend_pipeline : RID
+var skybox_blend_pipeline : RID
+var msaa_composite_pipelines := {}
 
+# Samplers and fallbacks: shared samplers and a black texture bound when there's no background.
 var nearest_sampler : RID
 var noise_sampler : RID
 var lut_sampler : RID
-# Linear with mipmaps, repeating around: the background panorama.
 var background_sampler : RID
-# Bound in place of a missing background.
 var black_texture : RID
+
+# GPU buffers: uniform and storage buffers the staging bytes are uploaded into.
 var params_buffer : RID
 var layers_buffer : RID
 var shadow_buffer : RID
@@ -491,40 +465,84 @@ var sky_buffer : RID
 var atmosphere_buffer : RID
 var point_sample_data_buffer : RID
 var lights_buffer : RID
-var transmittance_texture : RID
-var scattering_texture : RID
-var irradiance_texture : RID
-var shadow_texture : RID
-var shadow_texture_resolution := 0
-# Replaced textures and the engine frame from which they're freed.
+
+# Upload staging: CPU-side bytes for the GPU buffers and push constants, sized in _initialize().
+var params_bytes := PackedByteArray()
+var layers_bytes := PackedByteArray()
+var shadow_bytes := PackedByteArray()
+var sky_bytes := PackedByteArray()
+var atmosphere_bytes := PackedByteArray()
+var sample_bytes := PackedByteArray()
+var push_bytes := PackedByteArray()
+
+# Texture retirement: replaced textures and the engine frame each is safe to free from.
 var retired_textures : Array[RID] = []
 var retired_frames := PackedInt64Array()
 
-# ViewportStates by their RenderSceneBuffersRD's instance id.
+# Per-viewport state: ViewportStates by render buffers id, the current view's textures, and the last once-per-frame run.
 var viewport_states := {}
-# The current view's VIEW_TEXTURES.
 var view_textures : Array[RID] = [RID(), RID(), RID(), RID(), RID(), RID()]
-# Work done once per engine frame, whichever viewport draws first, and the shadow map's camera.
 var last_engine_frame := -1
+
+# Atmosphere: precomputed scattering LUTs, recompute flags, and the last sky settings written.
+var transmittance_texture : RID
+var scattering_texture : RID
+var irradiance_texture : RID
+var atmosphere_changed : bool = true
+var atmosphere_precompute_pending : bool = true
+var sky_settings_key := []
+
+# Cloud layers: enabled and last-synced layers, the profile texture, and the base noise's mean and deviation.
+var active_layers : Array[CloudLayer] = []
+var synced_layers : Array[CloudLayer] = []
+var profile_texture : ImageTexture
+var profile_image : Image
+var noise_stats := Vector2(0.5, 0.25)
+var noise_stats_texture : Texture3D
+
+# Shadow map: the blended texture, two keys rendered in turn (latest, ready count, age, camera and sun), and uniform sets.
+var shadow_texture : RID
+var shadow_texture_resolution := 0
 var shadow_camera := Vector3.ZERO
-# With cloud_shadow_update_interval above 1 the map is rendered into the two keys in turn, and
-# shadow_texture is blended between them every frame.
 var shadow_keys : Array[RID] = [RID(), RID()]
-# The key rendered last, how many keys hold a map (0 to 2), frames since the last one, and the
-# camera and sun it was rendered for.
 var shadow_key := 0
 var shadow_keys_ready := 0
 var shadow_age := 0
 var shadow_key_camera := Vector3.ZERO
 var shadow_key_sun := Vector3.ZERO
-# The shadow map writing shadow_texture, key 0 and key 1.
 var shadow_sets : Array[RID] = [RID(), RID(), RID()]
 var shadow_blend_set : RID
+
+# Shadow caster: the shadow light (instance id, 0 = none), its direction, and whether it's fading out for the next one.
+var shadow_caster_id := 0
+var shadow_caster_direction := Vector3.ZERO
+var shadow_fading := false
+
+# Shadow projector: the driver's projector, blit material, light and window centre (requests cross threads under the mutex).
+var shadow_projector : RID
+var shadow_projector_size := Vector2i.ZERO
+var shadow_blit_material : RID
+var shadow_light_transform : Transform3D
+var shadow_projector_light_id := 0
+var shadow_projector_center := Vector2.ZERO
+var shadow_projector_windowed := false
+var shadow_source : Texture2DRD
+var _shadow_projector_center_request := Vector2.ZERO
+var _shadow_projector_center_mutex := Mutex.new()
+
+# Density sample sets: the point-sample uniform set and the RIDs it was last built with.
 var sample_set : RID
 var density_set_inputs := PackedInt64Array()
-# The skybox panorama, and the keys it's blended between, as the shadow map's (sizes 0
-# while it's off). The key rendered last, how many hold a panorama, frames since the last render, and
-# the camera height and up, sun and settings it was rendered for.
+
+# Density sample queries: queued by add_sample(), answered up to MAX_SAMPLE_POINTS per batch (as SunshineClouds2).
+var positionQueries : Array[Vector3] = []
+var positionQueryCallables : Array[Callable] = []
+var positionQuerying : bool = false
+var positionResetting : bool = false
+var positionQueriesEncoded : int = 0
+var position_query_mutex := Mutex.new()
+
+# Skybox: panorama blended between two keys like the shadow map, its uniform sets, and request/version tracking.
 var skybox_texture : RID
 var skybox_texture_size := Vector2i.ZERO
 var skybox_keys : Array[RID] = [RID(), RID()]
@@ -536,19 +554,14 @@ var skybox_key_up := Vector3.UP
 var skybox_key_sun := Vector3.ZERO
 var skybox_key_clouds := PackedByteArray()
 var skybox_key_lights := 0
-# The skybox render writing skybox_texture, key 0 and key 1, the blend, and the RIDs they were built with.
 var skybox_sets : Array[RID] = [RID(), RID(), RID()]
 var skybox_blend_set : RID
 var skybox_set_inputs := PackedInt64Array()
-# What SkySettings was last written from.
-var sky_settings_key := []
-# Whether the blend has reached the latest key, and a count of the skybox's changes
-# (SunshineClouds3Driver refreshes its Sky's reflections when it moves).
 var skybox_blended := false
 var skybox_version := 0
-# When a driver last asked for the skybox (request_skybox()); -1 = never.
 var skybox_requested_msec := -1
 
+# Reflections: the image and its texture, global shader parameter, owning viewport, shaders and pipelines.
 var reflection_texture : Texture2DRD
 var reflection_global := &""
 var reflection_global_added := false
@@ -560,54 +573,14 @@ var reflection_shaders : Array[RID] = [RID(), RID()]
 var reflection_pipelines : Array[RID] = [RID(), RID()]
 var reflection_push := PackedByteArray()
 
-# The terrain heightmap: its shaders (HEIGHTMAP_VERSIONS, loaded the first time it's on; empty
-# until then) and Heightmap buffer (created with them), the bytes last uploaded, and a count that
-# goes up whenever its settings or texture change (the skybox redraws on it).
+# Terrain heightmap: shaders (loaded on first use), buffer, last uploaded bytes, and a version bumped on change.
 var heightmap_shaders : Array[RID] = []
 var heightmap_buffer : RID
 var heightmap_bytes := PackedByteArray()
 var heightmap_version := 0
 var heightmap_failed := false
 
-# Upload staging, sized in _initialize().
-var params_bytes := PackedByteArray()
-var layers_bytes := PackedByteArray()
-var shadow_bytes := PackedByteArray()
-var sky_bytes := PackedByteArray()
-var atmosphere_bytes := PackedByteArray()
-var sample_bytes := PackedByteArray()
-var push_bytes := PackedByteArray()
-
-var atmosphere_changed : bool = true
-var atmosphere_precompute_pending : bool = true
-var noise_stats := Vector2(0.5, 0.25)
-var noise_stats_texture : Texture3D
-var profile_texture : ImageTexture
-var profile_image : Image
-var active_layers : Array[CloudLayer] = []
-var synced_layers : Array[CloudLayer] = []
-
-# The light projector the driver hands over (set_shadow_projector()).
-var shadow_projector : RID
-var shadow_projector_size := Vector2i.ZERO
-var shadow_blit_material : RID
-var shadow_light_transform : Transform3D
-var shadow_projector_light_id := 0
-# The light space point (light local XY, metres) the projector's window is centred on
-# (set_shadow_projector_center()), and whether the light has repeat off and an offset (otherwise the
-# map goes on as it is, repeating). The blit centres the map on it and fades it out to the window's
-# edge.
-var shadow_projector_center := Vector2.ZERO
-var shadow_projector_windowed := false
-# The centre the driver should use next (the first viewport's camera, snapped to the map's texels),
-# written on the render thread and read on the main thread.
-var _shadow_projector_center_request := Vector2.ZERO
-var _shadow_projector_center_mutex := Mutex.new()
-
-# The lights and effectors for the clouds: encoded on the main thread by set_lights() and
-# set_effectors() when what they depend on (their keys) changes, none without a recent call;
-# uploaded on the render thread when dirty. With each directional light's instance id and direction,
-# and the one that should cast the shadows.
+# Light and effector encoding: encoded on the main thread, uploaded on the render thread when dirty (lights_mutex).
 var lights_mutex := Mutex.new()
 var lights_bytes := PackedByteArray()
 var effector_bytes := PackedByteArray()
@@ -616,107 +589,75 @@ var effector_count := 0
 var lights_key := []
 var effectors_key := []
 var lights_dirty := true
-# Counts the lights' uploads.
 var lights_version := 0
 var uploaded_atmosphere_enabled := false
 var lights_set_msec := -100000
+var point_scores := PackedFloat32Array()
+
+# Directional light tracking: instance ids and directions, and the light that should cast shadows.
 var light_ids := PackedInt64Array([0, 0, 0, 0])
 var light_directions := PackedVector3Array([Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, Vector3.ZERO])
 var light_id_count := 0
 var wanted_caster_id := 0
 var wanted_caster_direction := Vector3.ZERO
-var point_scores := PackedFloat32Array()
+
+# Light driving and fallback: whether a driver gave lights in the last 0.5 s, and fallback state.
+var lights_driven := false
+var using_fallback := true
+var fallback_key := []
+
+# Default settings: for lights and effectors without their own.
 var default_directional_settings := CloudDirectionalLightSettings.new()
 var default_omni_settings := CloudOmniLightSettings.new()
 var default_effector_settings := CloudEffectorSettings.new()
-# The lights the atmosphere is lit by: the directional lights on the clouds (towards each, and its
-# colour * energy, the atmosphere's sun at an energy of 1 being 1), written into the params every
-# frame less those below the horizon (_encode_atmosphere_lights()).
+
+# Atmosphere lights: direction and colour * energy of each, plus the render thread's per-frame copies.
 var atmosphere_light_directions := PackedVector3Array()
 var atmosphere_light_weights := PackedVector3Array()
-# Their copies the frame renders with (render thread only, taken under lights_mutex by the first
-# viewport).
 var frame_light_directions := PackedVector3Array()
 var frame_light_weights := PackedVector3Array()
-# The last directional lights a driver gave (each one's direction, colour * energy before the
-# radiance scale and multiplier, and shadow samples), kept with the effect for the fallback.
+
+# Shader hot reload: the sources' last md5s and the next check time.
+var shader_sources_hash := ""
+var next_shader_check := 0
+
+# The last directional lights a driver gave (direction, colour * energy before radiance scale and
+# multiplier, shadow samples), saved with the effect for the fallback.
 @export_storage var has_last_directional := false
 @export_storage var last_directional_directions := PackedVector3Array()
 @export_storage var last_directional_radiance := PackedVector3Array()
 @export_storage var last_directional_samples := PackedInt32Array()
-# Whether a driver is giving the lights (calls in the last half second), whether the directional
-# lights are the fallback ones, and what those were encoded from.
-var lights_driven := false
-var using_fallback := true
-var fallback_key := []
-# The light the shadow map is rendered for (instance id, 0 = none; the driver puts the projector on
-# it) and its direction, and whether its shadows are fading out for the next one.
-var shadow_caster_id := 0
-var shadow_caster_direction := Vector3.ZERO
-var shadow_fading := false
-var shadow_source : Texture2DRD
-
-# Cloud density samples, as SunshineClouds2 (same names): add_sample() queues a position and a
-# callable, a frame with no batch in flight samples up to MAX_SAMPLE_POINTS of them, and the
-# readback calls each callable in the order they were added. positionQueriesEncoded is how many
-# the batch in flight answers.
-var positionQueries : Array[Vector3] = []
-var positionQueryCallables : Array[Callable] = []
-var positionQuerying : bool = false
-var positionResetting : bool = false
-var positionQueriesEncoded : int = 0
-var position_query_mutex := Mutex.new()
-
-# The shader sources' md5s when auto_reload_shaders last looked, and when it looks next.
-var shader_sources_hash := ""
-var next_shader_check := 0
 
 
-## What the clouds keep per viewport (its textures are in its render buffers).
+## Per-viewport state (its textures live in its render buffers).
 class ViewportState:
+	# History: frame count and last view projections, for reprojection.
 	var frame := 0
 	var prev_view_projections : Array[Projection] = []
-	# Uniform sets per view and parity, rebuilt when an RID in set_inputs changes or the rendering
-	# device drops them.
+
+	# Uniform sets: per view and parity, rebuilt when set_inputs changes or the device drops them.
 	var raymarch_sets : Array[RID] = []
 	var resolve_sets : Array[RID] = []
 	var set_inputs := PackedInt64Array()
-	# While reflections are on: its internal size in pixels and the engine frame it last drew, which
-	# pick the viewport writing the reflection image.
+
+	# Reflections: pixel count and last drawn frame, used to pick the viewport writing the reflection image.
 	var reflection_pixels := 0
 	var reflection_frame := -1
 
 
-## Queues a cloud density sample at position (world space): callable is called with
-## (position : Vector3, density : float) a frame or two later, as SunshineClouds2's add_sample().
-## density is the cloud density in 0..1 summed over the layers containing position, before each
-## layer's density scales it.
+## Queues a cloud density sample at position (world space)
 func add_sample(callable : Callable, position : Vector3):
 	position_query_mutex.lock()
 	positionQueries.append(position)
 	positionQueryCallables.append(callable)
 	position_query_mutex.unlock()
 
-
-## Called every frame by a SunshineClouds3Driver that puts the skybox (skybox_texture) on its
-## WorldEnvironment: it's rendered only while asked for.
 func request_skybox() -> void:
 	skybox_requested_msec = Time.get_ticks_msec()
 
-
-## The reflection image (see reflections_enabled) as a texture: also the global shader
-## parameter's value. It can be given to a material's own uniform instead of using the global. Null
-## while reflections are off; the same texture while they stay on (its size follows the viewport).
 func get_reflection_texture() -> Texture2DRD:
 	return reflection_texture
 
-
-## Turns the terrain heightmap on (see heightmap_enabled) with texture covering the world X/Z
-## rectangle from position (x, z: its corner) of size, its heights position.y + value *
-## height_scale (m), at most max_height above position.y (0: height_scale). For a terrain system,
-## from the main thread, as often as it likes: a changed texture or bounds are only bound or
-## uploaded, nothing is read back or recompiled. Call it again after rewriting the texture's
-## contents on the GPU so the skybox redraws. heightmap_falloff_min/max are set on their own.
 func set_heightmap(texture : Texture2D, position : Vector3, size : Vector2, height_scale : float = 1.0, max_height : float = 0.0) -> void:
 	heightmap = texture
 	heightmap_position = position
@@ -726,18 +667,14 @@ func set_heightmap(texture : Texture2D, position : Vector3, size : Vector2, heig
 	heightmap_enabled = true
 	heightmap_version += 1
 
-
-## Turns the terrain heightmap off and lets go of its texture.
 func clear_heightmap() -> void:
 	heightmap_enabled = false
 	heightmap = null
-
 
 func _heightmap_changed() -> void:
 	heightmap_version += 1
 
 
-## Whether the heightmap lifts the clouds: on, with a texture and a size.
 func _heightmap_on() -> bool:
 	return heightmap_enabled && heightmap != null && heightmap_size.x > 0.0 && heightmap_size.y > 0.0
 
@@ -747,15 +684,14 @@ func _heightmap_max_height() -> float:
 	return heightmap_max_height if heightmap_max_height > 0.0 else maxf(heightmap_height_scale, 0.0)
 
 
-## The highest a layer from floor_height to ceiling (world heights, cloud_scale applied) reaches
-## lifted by the heightmap, as lifted_ceiling() in SunshineClouds3Raymarch.glsl.
+## Highest a layer from floor_height to ceiling (world heights, cloud_scale applied) reaches when
+## lifted; matches lifted_ceiling() in SunshineClouds3Raymarch.glsl.
 func _lifted_ceiling(floor_height : float, ceiling : float) -> float:
 	var terrain_top := heightmap_position.y + _heightmap_max_height()
 	return maxf(ceiling, minf(ceiling + maxf(terrain_top - floor_height, 0.0), terrain_top + maxf(heightmap_falloff_max, heightmap_falloff_min)))
 
 
-## The heightmap's bindings in the _heightmap shader versions: its texture (bilinear, clamped) and
-## the Heightmap buffer.
+## Bindings for the _heightmap shader versions: the texture (bilinear, clamped) and Heightmap buffer.
 func _heightmap_uniforms(heightmap_rid : RID) -> Array[RDUniform]:
 	return [
 		_uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 34, [lut_sampler, heightmap_rid]),
@@ -781,8 +717,8 @@ func _encode_heightmap(bytes : PackedByteArray) -> void:
 	bytes.encode_float(44, 0.0)
 
 
-## The heightmap shaders and buffer, made the first time the heightmap is on (render thread). False
-## if they couldn't be (the clouds then draw without it).
+## Creates the heightmap shaders and buffer on first use (render thread). False on failure; the
+## clouds then draw without it.
 func _ensure_heightmap_resources() -> bool:
 	if !heightmap_shaders.is_empty():
 		return true
@@ -805,8 +741,8 @@ func _ensure_heightmap_resources() -> bool:
 	return true
 
 
-## Adds reflection_parameter to the project's shader globals (a sampler2D without a texture; the
-## effect sets the texture at run time), and saves the project settings. In the editor.
+## Adds reflection_parameter to the project's shader globals as an empty sampler2D (set at run
+## time) and saves the project settings. Editor only.
 func add_reflection_parameter_to_project() -> void:
 	if reflection_parameter == &"":
 		push_warning("SunshineClouds3: reflection_parameter is empty.")
@@ -817,7 +753,7 @@ func add_reflection_parameter_to_project() -> void:
 		return
 	ProjectSettings.set_setting(setting, {"type": "sampler2D", "value": ""})
 	ProjectSettings.save()
-	# The editor's RenderingServer gets it as the shader globals editor would add it.
+	# Register it with the editor's RenderingServer, as the shader globals editor would.
 	if !RenderingServer.global_shader_parameter_get_list().has(reflection_parameter):
 		RenderingServer.global_shader_parameter_add(reflection_parameter, RenderingServer.GLOBAL_VAR_TYPE_SAMPLER2D, RID())
 	reflection_global = &""
@@ -884,8 +820,7 @@ func _release_reflection_global() -> void:
 	reflection_global_added = false
 
 
-## mid_frame: called from the render callback. Repointing the Texture2DRD then waits for the next frame, see
-## _point_reflection_texture.
+## mid_frame: called from the render callback; the Texture2DRD is repointed next frame (_point_reflection_texture).
 func _create_reflection_image(size : Vector2i, mid_frame := false) -> void:
 	if rd == null || reflection_texture == null:
 		return
@@ -906,16 +841,10 @@ func _create_reflection_image(size : Vector2i, mid_frame := false) -> void:
 		reflection_texture.texture_rd_rid = reflection_rd
 
 
-# Repointing a Texture2DRD replaces its RenderingServer texture, which frees the old shared view right away, and with
-# it the uniform set of every material sampling the reflection global. Done inside the render callback, materials
-# drawn later that frame (the transparent ocean) draw without their set: "Uniforms were never supplied for set (3)".
-# So a mid frame resize swaps here, a frame later; until then materials read the retired image, which stays valid
-# for longer than that (_retire).
 func _point_reflection_texture(texture : RID) -> void:
 	if reflection_texture == null || texture != reflection_rd || !rd.texture_is_valid(texture):
 		return # Superseded by a newer image, or reflections were turned off.
 	reflection_texture.texture_rd_rid = texture
-
 
 func _free_reflection_image() -> void:
 	if reflection_rd.is_valid():
@@ -970,7 +899,7 @@ func _write_reflection(color_layer : RID, depth_layer : RID, msaa : bool, size :
 
 func _init() -> void:
 	effect_callback_type = CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
-	lights_bytes.resize(144 + MAX_OMNI_LIGHTS * 48) # Lights block head: 144 byte header + directional lights, then 48 bytes per omni light; effectors follow. Must match the Lights block layout in SunshineClouds3Raymarch.glsl.
+	lights_bytes.resize(144 + MAX_OMNI_LIGHTS * 48) # 144 byte header + directional lights, then 48 bytes per omni light (effectors follow). Must match the Lights block in SunshineClouds3Raymarch.glsl.
 	effector_bytes.resize(MAX_EFFECTORS * 48)
 	# Initial values don't go through the setters.
 	_sync_layers()
@@ -991,7 +920,7 @@ func _notification(what : int) -> void:
 		transmittance_texture, scattering_texture, irradiance_texture, shadow_texture, shadow_keys[0], shadow_keys[1],
 		skybox_texture, skybox_keys[0], skybox_keys[1], black_texture, reflection_shaders[0], reflection_shaders[1], heightmap_buffer]
 	rids.append_array(heightmap_shaders)
-	# A global this effect added goes with it (written out: its own functions can't be called here).
+	# Remove a global this effect added (inlined: its own functions can't be called here).
 	if reflection_global != &"" && reflection_global_added:
 		RenderingServer.global_shader_parameter_remove(reflection_global)
 	if rd.texture_is_valid(reflection_rd):
@@ -1009,8 +938,8 @@ func _notification(what : int) -> void:
 			buffers.clear_context(BUFFERS_CONTEXT)
 
 
-## Reimports (in the editor) and recompiles the shaders, then swaps them in on the render thread.
-## If one doesn't compile, the clouds keep the shaders they had.
+## Reimports (in the editor) and recompiles the shaders on the render thread; if one fails, the old
+## ones are kept.
 func reload_shaders() -> void:
 	# EditorInterface only exists in editor builds; naming it directly fails to parse in exports.
 	if Engine.is_editor_hint() && Engine.has_singleton(&"EditorInterface"):
@@ -1040,7 +969,7 @@ func _reload_shaders() -> void:
 func _check_shader_sources() -> void:
 	if !auto_reload_shaders || Time.get_ticks_msec() < next_shader_check:
 		return
-	next_shader_check = Time.get_ticks_msec() + 1000 # Shader source poll interval (ms) for auto_reload_shaders. 500-2000: lower reacts faster to saves but hashes every shader file more often.
+	next_shader_check = Time.get_ticks_msec() + 1000 # Poll interval (ms). 500-2000: lower reacts faster but hashes every shader file more often.
 	if !Engine.has_singleton(&"EditorInterface") || Engine.get_singleton(&"EditorInterface").get_resource_filesystem().is_scanning():
 		return
 	var sources_hash := _shader_sources_hash()
@@ -1051,15 +980,14 @@ func _check_shader_sources() -> void:
 
 func _shader_sources_hash() -> String:
 	var hashes := PackedStringArray()
-	for directory : String in ["res://addons/SunshineClouds3/Compute/", "res://addons/SunshineClouds3/Compute/atmosphere/"]: # Folders whose .glsl and .glslinc files auto_reload_shaders watches; add any new shader folder here.
+	for directory : String in ["res://addons/SunshineClouds3/Compute/", "res://addons/SunshineClouds3/Compute/atmosphere/"]: # Watched shader folders; add new ones here.
 		for file in DirAccess.get_files_at(directory):
 			if file.get_extension() == "glsl" || file.get_extension() == "glslinc":
 				hashes.append(FileAccess.get_md5(directory + file))
 	return "".join(hashes)
 
 
-## Rebuilds active_layers from the enabled layers, and again whenever a layer changes (toggled or
-## its curves edited), rebaking the profiles.
+## Rebuilds active_layers from the enabled layers and rebakes the profiles; reruns whenever a layer changes.
 func _sync_layers() -> void:
 	var active : Array[CloudLayer] = []
 	var enabled_count := 0
@@ -1158,7 +1086,7 @@ func build_curl_noise() -> void:
 	if local_rd == null:
 		push_error("SunshineClouds3: building curl noise needs a RenderingDevice (Forward+ or Mobile).")
 		return
-	var spirv := (load("res://addons/SunshineClouds3/Compute/SunshineClouds3CurlNoise.glsl") as RDShaderFile).get_spirv() # Curl noise bake compute shader, run once when the curl texture is (re)built.
+	var spirv := (load("res://addons/SunshineClouds3/Compute/SunshineClouds3CurlNoise.glsl") as RDShaderFile).get_spirv()
 	var curl_shader := local_rd.shader_create_from_spirv(spirv) if spirv.compile_error_compute.is_empty() else RID()
 	if !curl_shader.is_valid():
 		push_error("SunshineClouds3CurlNoise.glsl: %s" % spirv.compile_error_compute)
@@ -1217,8 +1145,8 @@ func build_curl_noise() -> void:
 		curl_noise = curl
 
 
-## Saves images as an ImageTexture3D at path, rebuilding the loaded texture in place so everything
-## using it updates. Returns null if it couldn't be saved.
+## Saves images as an ImageTexture3D at path, rebuilding any loaded copy in place so users update.
+## Returns null on failure.
 func _save_texture_3d(path : String, format : Image.Format, size : Vector3i, images : Array[Image]) -> ImageTexture3D:
 	var texture : ImageTexture3D
 	if ResourceLoader.has_cached(path):
@@ -1271,7 +1199,7 @@ func _initialize() -> void:
 	shadow_buffer = rd.uniform_buffer_create(SHADOW_BYTES)
 	sky_buffer = rd.uniform_buffer_create(SKY_BYTES)
 	point_sample_data_buffer = rd.storage_buffer_create(SAMPLE_BUFFER_BYTES)
-	lights_buffer = rd.uniform_buffer_create(144 + (MAX_OMNI_LIGHTS + MAX_EFFECTORS) * 48) # Full Lights block: 144 byte header + directional lights, then 48 bytes per point (omni lights then effectors). Must match the points array size in SunshineClouds3Raymarch.glsl.
+	lights_buffer = rd.uniform_buffer_create(144 + (MAX_OMNI_LIGHTS + MAX_EFFECTORS) * 48) # Lights block: 144 byte header + directional lights, then 48 bytes per point (omni lights, then effectors). Must match SunshineClouds3Raymarch.glsl.
 
 	params_bytes.resize(PARAMS_BYTES)
 	layers_bytes.resize(MAX_LAYERS * LAYER_BYTES)
@@ -1284,9 +1212,8 @@ func _initialize() -> void:
 	skybox_set_inputs.resize(8)
 
 
-## Compiles the shaders, freeing the ones they replace (their pipelines and uniform sets go with
-## them). Returns false, keeping the old shaders, if one that draws doesn't compile; without the
-## sample shader samples just stay queued.
+## Compiles the shaders, freeing those replaced (and with them their pipelines and uniform sets).
+## Returns false, keeping the old ones, if a draw shader fails; without the sample shader, samples stay queued.
 func _create_shaders() -> bool:
 	var new_shaders : Array[RID] = [_load_shader(SHADER_PATH, &"raymarch"), _load_shader(RESOLVE_SHADER_PATH, &"resolve"),
 		_load_shader(SHADER_PATH, &"shadow_map"), _load_shader(SHADER_PATH, &"shadow_blend"),
@@ -1316,7 +1243,7 @@ func _create_shaders() -> bool:
 	resolve_msaa_shader = new_shaders[7]
 	msaa_composite_shader = new_shaders[8]
 	msaa_composite_pipelines.clear()
-	# The reflection shaders load again the next time they're used.
+	# The reflection shaders reload on next use.
 	for s : RID in reflection_shaders:
 		if s.is_valid():
 			rd.free_rid(s)
@@ -1333,9 +1260,9 @@ func _create_shaders() -> bool:
 
 	for pipelines : Array[RID] in [raymarch_pipelines, resolve_pipelines, shadow_pipelines, skybox_pipelines, sample_pipelines, precompute_pipelines]:
 		pipelines.clear()
-	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3 * 2 * 2) # Per layer count and interlace pass, without and with MSAA, without and with the heightmap.
-	resolve_pipelines.resize(8) # Atmosphere off/on, without and with MSAA, without and with glow shadows.
-	# Per layer count, without and with the heightmap.
+	raymarch_pipelines.resize((MAX_LAYERS + 1) * 3 * 2 * 2) # Layer count x interlace pass x MSAA off/on x heightmap off/on.
+	resolve_pipelines.resize(8) # Atmosphere x MSAA x glow shadows, each off/on.
+	# Layer count x heightmap off/on.
 	shadow_pipelines.resize((MAX_LAYERS + 1) * 2)
 	skybox_pipelines.resize((MAX_LAYERS + 1) * 2)
 	sample_pipelines.resize((MAX_LAYERS + 1) * 2)
@@ -1385,7 +1312,7 @@ func _create_atmosphere_texture(size : Vector3i, format : RenderingDevice.DataFo
 ## Frees a texture a few frames from now.
 func _retire(texture : RID) -> void:
 	retired_textures.append(texture)
-	retired_frames.append(Engine.get_frames_drawn() + 3) # Frames a replaced texture waits before it's freed: freeing mid frame breaks materials drawn later that frame. 2-4: needs to cover the frames in flight; higher only holds VRAM longer.
+	retired_frames.append(Engine.get_frames_drawn() + 3) # Freeing mid frame breaks materials drawn later that frame. 2-4: must cover frames in flight; higher only holds VRAM longer.
 
 
 func _precompute_dispatch(version : int, uniforms : Array[RDUniform], size : Vector3i, scattering_order : int = 0) -> void:
@@ -1418,10 +1345,9 @@ func _uniform(type : RenderingDevice.UniformType, binding : int, ids : Array[RID
 	return uniform
 
 
-## Called by SunshineClouds3Driver on the render thread: the light projector (a DrawableTexture2D
-## of target_size) the shadow map is blitted into each frame through blit_material, and the
-## transform and instance id of the light it's on (shadow_caster_id). An invalid target means none:
-## the shadows fall back to screen space.
+## Called by SunshineClouds3Driver (render thread): the projector (a DrawableTexture2D of target_size)
+## the shadow map is blitted into each frame via blit_material, and its light's transform and instance
+## id. An invalid target falls back to screen-space shadows.
 func set_shadow_projector(target : RID, target_size : Vector2i, blit_material : RID, light_transform : Transform3D, light_id : int) -> void:
 	shadow_projector = target
 	shadow_projector_size = target_size
@@ -1430,16 +1356,16 @@ func set_shadow_projector(target : RID, target_size : Vector2i, blit_material : 
 	shadow_projector_light_id = light_id
 
 
-## Called by SunshineClouds3Driver on the render thread: the light space point (light local XY) the
-## light's projector window is centred on (its offset is minus it), from the next blit on, and
-## whether the light has repeat off (windowed); otherwise the map is blitted as it is.
+## Called by SunshineClouds3Driver (render thread): the light-space point (light local XY) the projector
+## window is centred on from the next blit (its offset is minus it), and whether the light has repeat
+## off (windowed); otherwise the map is blitted as is.
 func set_shadow_projector_center(center : Vector2, windowed : bool) -> void:
 	shadow_projector_center = center
 	shadow_projector_windowed = windowed
 
 
-## Called by SunshineClouds3Driver (main thread): the centre the projector's window should move to,
-## the first viewport's camera in the shadow light's space snapped to the map's texels.
+## Called by SunshineClouds3Driver (main thread): where the projector window should move, i.e. the
+## first viewport's camera in light space snapped to map texels.
 func get_shadow_projector_center_request() -> Vector2:
 	_shadow_projector_center_mutex.lock()
 	var center := _shadow_projector_center_request
@@ -1447,27 +1373,13 @@ func get_shadow_projector_center_request() -> Vector2:
 	return center
 
 
-## Called by SunshineClouds3Driver every frame (main thread), with set_effectors(): the lights on the
-## clouds, each with its settings at the same index (defaults where there are none). A light's
-## energy on the clouds is light_energy * light_volumetric_fog_energy * its settings'
-## energy_multiplier * the effect's directional or omni energy multiplier. Every directional light
-## on the clouds (the first MAX_DIRECTIONAL_LIGHTS shown with energy) also lights the atmosphere, at
-## its settings' colour * light_energy * light_volumetric_fog_energy * energy_multiplier (not the
-## directional multiplier, which is the clouds' alone): 1 is the precomputed atmosphere's own sun,
-## and radiance_scale scales both. A light a driver hid below the horizon (BELOW_HORIZON_META)
-## counts as shown. The strongest directional light that may cast cloud shadows
-## (energy faded towards the horizon as its shadows are) casts them. A SunshineOmniLight uses its
-## own settings, and its cloud_radius as its range. Omni lights count only where their range reaches the layers, the nearest MAX_OMNI_LIGHTS to camera_position when more do. They
-## are encoded again only when what they depend on changes. Without a call for half a second there
-## are none, and the directional lights fall back (see fallback_light_elevation), as they do while
-## none of the directional lights given exist.
 func set_lights(directional_lights : Array[DirectionalLight3D], directional_settings : Array[CloudDirectionalLightSettings],
 		omni_lights : Array[OmniLight3D], omni_settings : Array[CloudOmniLightSettings], camera_position : Vector3) -> void:
 	var layers_span := _layers_span()
 	var key := [radiance_scale, directional_energy_multiplier, omni_energy_multiplier, cloud_shadow_horizon_fade, light_step_growth,
 		light_march_distance, layers_span, cloud_scale]
 	if omni_lights.size() > MAX_OMNI_LIGHTS:
-		# Which are the nearest moves with the camera.
+		# The nearest set changes as the camera moves.
 		key.append(camera_position)
 	for i in directional_lights.size():
 		if !is_instance_valid(directional_lights[i]):
@@ -1495,11 +1407,6 @@ func set_lights(directional_lights : Array[DirectionalLight3D], directional_sett
 	lights_mutex.unlock()
 
 
-## Called by SunshineClouds3Driver every frame (main thread), with set_lights(): the effectors on the
-## clouds, each with its settings at the same index (defaults where there are none; a SunshineEffector
-## uses its own). Each one's radius is scaled by its largest scale. They count only where their radius
-## reaches the layers, the nearest MAX_EFFECTORS to camera_position when more do, and follow the omni
-## lights in the Lights buffer. They are encoded again only when what they depend on changes.
 func set_effectors(effectors : Array[Node3D], effector_settings : Array[CloudEffectorSettings], camera_position : Vector3) -> void:
 	var key := [_layers_span()]
 	if effectors.size() > MAX_EFFECTORS:
@@ -1520,8 +1427,7 @@ func set_effectors(effectors : Array[Node3D], effector_settings : Array[CloudEff
 	lights_mutex.unlock()
 
 
-# The lowest floor and highest ceiling of the layers, times cloud_scale (the ceilings as lifted by the
-# heightmap at most, while it's on).
+# Lowest floor and highest ceiling of the layers, times cloud_scale (ceilings at max heightmap lift while on).
 func _layers_span() -> Vector2:
 	var span := Vector2(INF, -INF)
 	var lifted := _heightmap_on()
@@ -1538,15 +1444,14 @@ func _reaches_layers(position : Vector3, radius : float, layers_span : Vector2) 
 	return radius > 0.0 && height - radius <= layers_span.y && height + radius >= layers_span.x
 
 
-## The planet's centre: planet_center with spherical_planet, else (0, -planet_radius, 0). Its radius
-## is scaled by cloud_scale with the top of the planet staying put.
+## planet_center with spherical_planet, else (0, -planet_radius, 0); shifted so the planet's top
+## stays put as cloud_scale scales its radius.
 func get_planet_center() -> Vector3:
 	var center := planet_center if spherical_planet else Vector3(0.0, -planet_radius * 1000.0, 0.0)
 	return center + Vector3.UP * planet_radius * 1000.0 * (1.0 - cloud_scale)
 
 
-## The height the cloud layers are placed by at position: world Y, or with spherical_planet the
-## altitude above the planet's surface.
+## Height the cloud layers are placed by: world Y, or with spherical_planet the altitude above the surface.
 func get_cloud_height(position : Vector3) -> float:
 	return position.distance_to(get_planet_center()) - planet_radius * 1000.0 * cloud_scale if spherical_planet else position.y
 
@@ -1556,8 +1461,7 @@ func get_planet_up(position : Vector3) -> Vector3:
 	return (position - get_planet_center()).normalized() if spherical_planet else Vector3.UP
 
 
-# Encodes the directional lights (at most MAX_DIRECTIONAL_LIGHTS) and picks the shadow caster, and
-# keeps them for the fallback. With none of them existing, the fallback lights instead.
+
 func _encode_directional_lights(lights : Array[DirectionalLight3D], settings : Array[CloudDirectionalLightSettings]) -> void:
 	var directional_radiance := _solar_irradiance() * radiance_scale * directional_energy_multiplier
 	var horizon := sin(deg_to_rad(cloud_shadow_horizon_fade))
@@ -1572,7 +1476,7 @@ func _encode_directional_lights(lights : Array[DirectionalLight3D], settings : A
 	for i in lights.size():
 		if !is_instance_valid(lights[i]):
 			continue
-		# Hidden or unlit ones count: they're the lights given, just dark.
+		# Hidden or unlit lights still count as given, just dark.
 		any_exist = true
 		if light_id_count == MAX_DIRECTIONAL_LIGHTS:
 			continue
@@ -1610,9 +1514,8 @@ func _encode_directional_lights(lights : Array[DirectionalLight3D], settings : A
 	lights_bytes.encode_s32(0, light_id_count)
 
 
-## Whether light is shown, as is_visible_in_tree(), or would be but for a SunshineClouds3Driver having
-## hidden it below the horizon (BELOW_HORIZON_META): it still lights the clouds and the atmosphere
-## (its twilight) as it did before it was hidden.
+## is_visible_in_tree(), or would be but for a driver hiding it below the horizon (BELOW_HORIZON_META);
+## such a light still lights the clouds and atmosphere (twilight).
 static func light_shown(light : DirectionalLight3D) -> bool:
 	if light.is_visible_in_tree():
 		return true
@@ -1622,8 +1525,6 @@ static func light_shown(light : DirectionalLight3D) -> bool:
 	return parent == null || parent.is_visible_in_tree()
 
 
-# Encodes the directional lights without a driver's: the last ones a driver gave, else the fallback
-# light. Neither casts the shadow map (there's no light to project it from).
 func _encode_fallback_lights() -> void:
 	using_fallback = true
 	fallback_key = _fallback_key()
@@ -1663,11 +1564,6 @@ func _fallback_key() -> Array:
 		fallback_light_elevation, fallback_light_azimuth, fallback_light_color, fallback_light_energy]
 
 
-# Writes the atmosphere's lights into params_bytes (atmosphere_light_count and atmosphere_lights in
-# SunshineClouds3Common.glslinc): those of directions and weights with any light and not too far
-# below the horizon at the camera (up, ATMOSPHERE_LIGHT_MIN_MU), so the shaders' loops skip the
-# rest. Each one's disc covers what's behind it by its weight's luminance, at most 1. Returns the
-# first one's direction (up for none), whose jumps re-render the skybox at once.
 func _encode_atmosphere_lights(directions : PackedVector3Array, weights : PackedVector3Array, up : Vector3) -> Vector3:
 	var count := 0
 	var first := up
@@ -1685,8 +1581,7 @@ func _encode_atmosphere_lights(directions : PackedVector3Array, weights : Packed
 	return first
 
 
-## Forgets the last directional lights a driver gave, so the fallback light lights the clouds until
-## one gives some again.
+## Forgets the last directional lights a driver gave; the fallback light is used until a driver gives more.
 func forget_last_lights() -> void:
 	lights_mutex.lock()
 	has_last_directional = false
@@ -1696,7 +1591,6 @@ func forget_last_lights() -> void:
 	lights_mutex.unlock()
 
 
-# Encodes the omni lights reaching the layers as the first points. Returns how many.
 func _encode_omni_lights(lights : Array[OmniLight3D], settings : Array[CloudOmniLightSettings], camera_position : Vector3, layers_span : Vector2) -> int:
 	var reaching := 0
 	_size_point_scores(lights.size())
@@ -1723,8 +1617,6 @@ func _encode_omni_lights(lights : Array[OmniLight3D], settings : Array[CloudOmni
 	return count
 
 
-# An omni light's range on the clouds, energy multiplier and shadow samples: a SunshineOmniLight's
-# own (its cloud_radius), else its settings' with its omni_range.
 func _omni_shape(light : OmniLight3D, settings : Array[CloudOmniLightSettings], index : int) -> Vector3:
 	var sunshine_light := light as SunshineOmniLight
 	if sunshine_light != null:
@@ -1733,7 +1625,6 @@ func _omni_shape(light : OmniLight3D, settings : Array[CloudOmniLightSettings], 
 	return Vector3(light.omni_range, light_settings.energy_multiplier, light_settings.shadow_samples)
 
 
-# Encodes the effectors reaching the layers into effector_bytes. Returns how many.
 func _encode_effectors(effectors : Array[Node3D], settings : Array[CloudEffectorSettings], camera_position : Vector3, layers_span : Vector2) -> int:
 	var reaching := 0
 	_size_point_scores(effectors.size())
@@ -1754,8 +1645,6 @@ func _encode_effectors(effectors : Array[Node3D], settings : Array[CloudEffector
 	return count
 
 
-# An effector's radius (times its largest scale), strength and falloff: a SunshineEffector's own,
-# otherwise its settings' at index (the defaults where there are none).
 func _effector_shape(effector : Node3D, settings : Array[CloudEffectorSettings], index : int) -> Vector3:
 	var scale := effector.global_transform.basis.get_scale().abs()
 	var largest := maxf(scale.x, maxf(scale.y, scale.z))
@@ -1766,15 +1655,14 @@ func _effector_shape(effector : Node3D, settings : Array[CloudEffectorSettings],
 	return Vector3(effector_settings.radius * largest, effector_settings.strength, effector_settings.falloff)
 
 
-# point_scores for size nodes, all left out (INF) until scored: distance to the camera less radius.
+# Resets point_scores for size nodes to INF (unscored); a score is distance to the camera less radius.
 func _size_point_scores(size : int) -> void:
 	if point_scores.size() < size:
 		point_scores.resize(size)
 	point_scores.fill(INF)
 
 
-# The next of size scored nodes to encode, taken out of point_scores: the first in list order when
-# they all fit, otherwise the nearest.
+# Takes the next scored node out of point_scores: the first in list order when all fit, else the nearest.
 func _next_point(size : int, nearest : bool) -> int:
 	var next := -1
 	for i in size:
@@ -1786,8 +1674,8 @@ func _next_point(size : int, nearest : bool) -> int:
 	return next
 
 
-## The first of steps light march steps, growing by light_step_growth to span light_march_distance
-## (times cloud_scale): first * (growth^n - 1) / (growth - 1) = that distance.
+## First of steps light march steps growing by light_step_growth to span light_march_distance (times
+## cloud_scale): first * (growth^n - 1) / (growth - 1) = distance.
 func _first_light_step(steps : int) -> float:
 	if steps <= 0:
 		return 0.0
@@ -1805,13 +1693,12 @@ func _solar_irradiance() -> Vector3:
 			1.91198, 2.03474, 2.02042, 2.02212, 1.93377, 1.95809, 1.91686, 1.8298, 1.8685, 1.8931, 1.85149,
 			1.8504, 1.8341, 1.8345, 1.8147, 1.78158, 1.7533, 1.6965, 1.68194, 1.64654, 1.6048, 1.52143,
 			1.55622, 1.5113, 1.474, 1.4482, 1.41018, 1.36775, 1.34188, 1.31429, 1.28303, 1.26758, 1.2367,
-			1.2082, 1.18737, 1.14683, 1.12362, 1.1058, 1.07124, 1.04992][int(ATMOSPHERE_LAMBDAS[i] - 360.0) / 10] # Solar irradiance (W.m^-2.nm^-1) from Bruneton's demo.cc, 10 nm bins from 360 to 830 nm. Measured data, don't tune: values sit around 1.0-2.0.
+			1.2082, 1.18737, 1.14683, 1.12362, 1.1058, 1.07124, 1.04992][int(ATMOSPHERE_LAMBDAS[i] - 360.0) / 10] # W.m^-2.nm^-1 from Bruneton's demo.cc, 10 nm bins from 360 to 830 nm. Measured data, don't tune.
 	return solar
 
 
-## Colour of a light towards direction at position after the atmosphere (as
-## GetTransmittanceToSun at ATMOSPHERE_LAMBDAS for r, g, b, integrated on the CPU), white balanced
-## against it straight overhead; 0 once its disc has set.
+## Colour of a light towards direction at position after the atmosphere (GetTransmittanceToSun at
+## ATMOSPHERE_LAMBDAS, on the CPU), white balanced against overhead; 0 once its disc has set.
 func get_light_color(direction : Vector3, position : Vector3) -> Color:
 	var bottom := planet_radius * 1000.0
 	# Unscaled, as the atmosphere is the same one scaled by cloud_scale.
@@ -1867,14 +1754,13 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		background_rid = black_texture
 	if !noise_rid.is_valid() || !profile_rid.is_valid() || !coverage_rid.is_valid() || !curl_rid.is_valid():
 		return
-	# The terrain heightmap: while it's on, every pass that samples the clouds runs its _heightmap
-	# version with the texture and the Heightmap buffer bound. Off, nothing of it is touched.
+	# Heightmap: while on, every cloud-sampling pass runs its _heightmap version with the texture and
+	# Heightmap buffer bound. Off, none of it is touched.
 	var heightmap_rid := RID()
 	if _heightmap_on() && _ensure_heightmap_resources():
 		heightmap_rid = RenderingServer.texture_get_rd_texture(heightmap.get_rid())
 	var lifted := heightmap_rid.is_valid()
-	# Changes to layers that skipped its setter (e.g. layers.append()) are picked up on the main
-	# thread, which owns the profile texture.
+	# Layer changes that skipped the setter (e.g. layers.append()) sync on the main thread (owns the profile).
 	if layers != synced_layers:
 		_sync_layers.call_deferred()
 	var frame_layers := active_layers
@@ -1914,12 +1800,10 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	var reflect := reflections_enabled && reflection_texture != null && _is_reflection_owner(buffers, state, size, engine_frame)
 	var view_count := buffers.get_view_count()
 	var raymarch_size := Vector2i(ceili(float(size.x) / raymarch_resolution), ceili(float(size.y) / raymarch_resolution))
-	# With 3D MSAA the scene is in multisampled textures until the end of the transparent pass, when
-	# Godot resolves the colour over anything written to the resolved one before (and its depth
-	# resolve averages the samples). The raymarch and resolve then run their msaa versions, which
-	# read the multisampled depth, and the resolve leaves its changes to the colour per surface
-	# (msaa_near, msaa_far) for SunshineClouds3MsaaComposite.glsl to blend into the multisampled
-	# colour a sample at a time.
+	# With 3D MSAA the scene stays multisampled until the end of the transparent pass, when Godot resolves
+	# the colour over anything written to the resolved texture (and averages depth). So the raymarch and
+	# resolve run msaa versions reading multisampled depth, and the resolve stores its colour changes per
+	# surface (msaa_near, msaa_far) for SunshineClouds3MsaaComposite.glsl to blend in per sample.
 	var msaa := buffers.get_msaa_3d() != RenderingServer.VIEWPORT_MSAA_DISABLED
 	if buffers.has_texture(BUFFERS_CONTEXT, &"raymarch") && buffers.get_texture_slice_size(BUFFERS_CONTEXT, &"raymarch", 0) != raymarch_size:
 		buffers.clear_context(BUFFERS_CONTEXT)
@@ -1937,15 +1821,13 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					RenderingDevice.TEXTURE_SAMPLES_1, size, view_count, 1, true, false)
 		state.prev_view_projections.clear()
 
-	# Visual profiler: ">" opens a folder and "<" closes it; each timestamp is an entry lasting
-	# until the next one.
+	# Visual profiler: ">" opens a folder, "<" closes it; each timestamp lasts until the next.
 	rd.capture_timestamp(">Sunshine Clouds")
 	if atmosphere_changed:
 		atmosphere_changed = false
 		atmosphere_precompute_pending = true
-		# Bruneton's AtmosphereParameters for ATMOSPHERE_LAMBDAS, in kilometres, as model.cc builds
-		# them from demo.cc's spectra (the lambdas fall on the 10 nm bins). Lengths are times
-		# cloud_scale and extinctions over it, so the scaled atmosphere looks the same.
+		# Bruneton's AtmosphereParameters for ATMOSPHERE_LAMBDAS in km, as model.cc builds them from
+		# demo.cc's spectra. Lengths are times cloud_scale and extinctions over it, so scaling looks the same.
 		var solar := _solar_irradiance()
 		var rayleigh := Vector3.ZERO
 		var absorption := Vector3.ZERO
@@ -2035,9 +1917,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		_retire(delta_mie)
 		_retire(delta_scattering_density)
 
-	# The layers once a frame: their wind delta is since the last frame. Their sizes are times
-	# cloud_scale and their extinction over it; the noise offsets are world positions already (the
-	# driver scales the wind).
+	# Layers, once a frame (wind delta is since the last frame). Sizes are times cloud_scale and extinction
+	# over it; noise offsets are already world positions (the driver scales the wind).
 	if first_viewport:
 		for i in layer_count:
 			var layer := frame_layers[i]
@@ -2111,8 +1992,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		var mean := total / maxi(count, 1)
 		noise_stats = Vector2(mean, sqrt(maxf(total_squared / maxi(count, 1) - mean * mean, 1e-6))) if count > 0 else Vector2(0.5, 0.25)
 
-	# A tiny shadow map while shadows are off, which the resolve still binds; keys only while it's
-	# not rendered every frame.
+	# A tiny shadow map while shadows are off (the resolve still binds it); keys only if not rendered every frame.
 	var shadow_resolution := cloud_shadow_resolution if cloud_shadows else 4
 	var use_keys := cloud_shadows && cloud_shadow_update_interval > 1
 	if shadow_resolution != shadow_texture_resolution || use_keys != shadow_keys[0].is_valid():
@@ -2140,8 +2020,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	if first_viewport:
 		lights_mutex.lock()
 		if lights_driven && Time.get_ticks_msec() - lights_set_msec > 500:
-			# No driver updating them: the fallback directional lights, no omni lights or effectors.
-			# Encoded again from scratch once calls resume.
+			# No driver: fallback directional lights, no omni lights or effectors; fully re-encoded once calls resume.
 			lights_driven = false
 			lights_key = []
 			effectors_key = []
@@ -2235,10 +2114,9 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		var depth_layer := buffers.get_depth_layer(view, msaa)
 		var msaa_near := buffers.get_texture_slice(BUFFERS_CONTEXT, &"msaa_near", view, 0, 1, 1) if msaa else RID()
 		var msaa_far := buffers.get_texture_slice(BUFFERS_CONTEXT, &"msaa_far", view, 0, 1, 1) if msaa else RID()
-		if view == 0: #TODO: Add timing offsets to make this only render every other frame or every 3rd etc, for performance modulation.
-			# The shadow map passes and point samples bind the same textures; their sets are rebuilt
-			# together. None reads the depth, so binding 1 gets a texture of ours instead of a
-			# viewport's. Bindings a shader doesn't declare are ignored.
+		if view == 0: #TODO: Add timing offsets to render this only every Nth frame, for performance.
+			# The shadow map passes and point samples bind the same textures, so their sets are rebuilt together.
+			# None reads depth, so binding 1 gets one of our textures; undeclared bindings are ignored.
 			var density_inputs_changed := _set_input(density_set_inputs, 0, noise_rid)
 			density_inputs_changed = _set_input(density_set_inputs, 1, profile_rid) || density_inputs_changed
 			density_inputs_changed = _set_input(density_set_inputs, 2, coverage_rid) || density_inputs_changed
@@ -2281,9 +2159,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						_uniform(RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER, 22, [point_sample_data_buffer]),
 					])
 
-			# The shadow map, and the Shadow buffer the resolve's screen space shadows read: once a
-			# frame, and again, straight into shadow_texture, for a viewport whose camera is away
-			# from the one it's centred on.
+			# The shadow map and Shadow buffer (read by screen-space shadows): once a frame, and again straight
+			# into shadow_texture for a viewport whose camera is far from the map's centre.
 			var shadow_extent := maxf(cloud_shadow_extent * cloud_scale, 1.0)
 			var far_camera := !first_viewport && cam_transform.origin.distance_to(shadow_camera) > shadow_extent * 0.01
 			if first_viewport || far_camera:
@@ -2291,9 +2168,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 				var keyed := shadow_keys[0].is_valid() && !far_camera
 				if keyed:
 					shadow_age += 1
-				# A new caster: with keys, the current one's shadows first fade out to a lit key over
-				# the interval and the next one's then fade in from it (two maps in different light
-				# spaces can't be blended); without, it switches at once.
+				# New caster: with keys, the current shadows fade out to a lit key over the interval, then the
+				# new ones fade in (maps in different light spaces can't blend); without keys, switch at once.
 				if far_camera || wanted_id == shadow_caster_id:
 					shadow_fading = false
 				elif keyed && shadow_keys_ready > 0 && !shadow_fading:
@@ -2310,8 +2186,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 					shadow_key_sun = shadow_caster_direction
 					shadow_age = cloud_shadow_update_interval
 
-				# The projector has to be on the caster: the driver moves it a frame after a switch,
-				# and until then nothing is drawn.
+				# The projector must be on the caster; the driver moves it a frame after a switch.
 				var projector_mode := cloud_shadow_mode == SHADOW_MODE_PROJECTOR && shadow_projector.is_valid() && shadow_blit_material.is_valid()
 				var projector := projector_mode && shadow_projector_light_id == shadow_caster_id
 				if !projector_mode || projector:
@@ -2321,8 +2196,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 							Vector3.FORWARD if absf(shadow_caster_direction.y) > 0.99 else Vector3.UP), Vector3.ZERO)
 					var world_to_light := light_to_world.affine_inverse()
 					if projector && first_viewport && shadow_projector_size.x > 0:
-						# The next window centre: the camera in light space, snapped to whole texels so
-						# the blit only moves the map by whole texels (no resampling, no swimming).
+						# Next window centre: camera in light space, snapped to whole texels (no swimming).
 						var texel := shadow_extent / shadow_projector_size.x
 						var camera_light := world_to_light * cam_transform.origin
 						_shadow_projector_center_mutex.lock()
@@ -2330,15 +2204,14 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						_shadow_projector_center_mutex.unlock()
 					var to_sun := light_to_world.basis.z.normalized()
 					var sun_height := to_sun.dot(get_planet_up(cam_transform.origin))
-					# The horizon fade scales the strength. Faded out, screen space skips the map; the
-					# projector still gets it (all lit), so the light doesn't keep the last shadows.
+					# The horizon fade scales strength. Faded out, screen space skips the map; the projector
+					# still gets it (all lit) so the light doesn't keep stale shadows.
 					var fade := 1.0 if sun_height > 0.0 else 0.0
 					if cloud_shadow_horizon_fade > 0.0:
 						fade = smoothstep(0.0, sin(deg_to_rad(cloud_shadow_horizon_fade)), sun_height)
 					var shadows_active := cloud_shadows && layer_count > 0 && shadow_caster_direction != Vector3.ZERO && (fade > 0.0 || projector)
 
-					# With keys, the map is rendered every interval frames into them in turn, and again
-					# right away after the camera or sun jumps (the keys would show the wrong place).
+					# With keys, render into them in turn every interval frames, and at once after a camera or sun jump.
 					var render := shadows_active
 					if keyed:
 						var reset := shadow_keys_ready == 0 \
@@ -2374,7 +2247,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						_encode_vec4(shadow_bytes, 144, world_to_light * cam_transform.origin, 0.0)
 						shadow_bytes.encode_s32(156, cloud_shadow_steps)
 						shadow_bytes.encode_float(160, march_floor if shadows_active else 0.0)
-						shadow_bytes.encode_float(164, minf(thickness / sun_height, thickness * 8.0) if shadows_active && sun_height > 0.001 else 0.0) # Max shadow march length as a multiple of layer thickness: with a low sun the march would otherwise run for hundreds of km. 4-16: lower is cheaper but clips long low-sun shadows.
+						shadow_bytes.encode_float(164, minf(thickness / sun_height, thickness * 8.0) if shadows_active && sun_height > 0.001 else 0.0) # Caps the march at 8x layer thickness: a low sun would otherwise march hundreds of km. 4-16: lower is cheaper but clips low-sun shadows.
 						shadow_bytes.encode_s32(168, 1 if shadows_active && !projector else 0)
 						shadow_bytes.encode_float(172, screen_space_shadow_strength)
 						shadow_bytes.encode_float(176, cloud_shadow_edge_fade * extent * 0.5)
@@ -2387,8 +2260,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						rd.compute_list_dispatch(list, groups, groups, 1)
 						rd.compute_list_end()
 					if keyed && shadows_active:
-						# The latest key's weight goes from 1 / interval after it's rendered to 1 when the
-						# next one is due; with only one key so far it's that one.
+						# Latest key's weight ramps from 1 / interval to 1 when the next is due (1 with one key).
 						var latest_weight := minf(float(shadow_age + 1) / cloud_shadow_update_interval, 1.0) if shadow_keys_ready == 2 else 1.0
 						push_bytes.encode_float(0, latest_weight if shadow_key == 1 else 1.0 - latest_weight)
 						var list := rd.compute_list_begin()
@@ -2398,16 +2270,14 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 						rd.compute_list_dispatch(list, groups, groups, 1)
 						rd.compute_list_end()
 					if shadows_active && projector:
-						# Blitting into the DrawableTexture2D is what makes Godot copy it into the decal
-						# atlas (where projectors are sampled from) again; a texture written by compute
-						# never is. Called by name: older engines have no drawable blit.
+						# Only a blit into the DrawableTexture2D makes Godot re-copy it into the decal atlas
+						# (where projectors sample); compute writes never do. Called by name: older engines lack it.
 						if shadow_source == null:
 							shadow_source = Texture2DRD.new()
 						if shadow_source.texture_rd_rid != shadow_texture:
 							shadow_source.texture_rd_rid = shadow_texture
-						# The map repeats every extent; the blit takes the window around
-						# shadow_projector_center out of it (r, g: the shift in texels over the
-						# resolution, b: where the edge fade starts, a: 1 = windowed).
+						# The map repeats every extent; the blit takes the window around shadow_projector_center
+						# (r, g: shift in texels / resolution, b: edge fade start, a: 1 = windowed).
 						var blit_params := Color(0.0, 0.0, 1.0, 0.0)
 						if shadow_projector_windowed:
 							var resolution := shadow_projector_size.x
@@ -2440,8 +2310,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 				rd.compute_list_dispatch(list, 1, 1, 1)
 				rd.compute_list_end()
 
-		# Rebuild the view's uniform sets only when something they bind changed or the rendering
-		# device dropped them (a bound resource was freed).
+		# Rebuild the view's uniform sets only when a binding changed or the device dropped them (resource freed).
 		var base := view * SET_INPUT_COUNT
 		var inputs_changed := _set_input(state.set_inputs, base, color_layer)
 		inputs_changed = _set_input(state.set_inputs, base + 1, depth_layer) || inputs_changed
@@ -2466,8 +2335,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 			var raymarch_b_texture := view_textures[3]
 			var atmosphere_uniform := _uniform(RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER, 9, [atmosphere_buffer])
 			var transmittance_uniform := _uniform(RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 10, [lut_sampler, transmittance_texture])
-			# The resolve writes the histories of the frame's parity and reads the other's, as does
-			# the raymarch for the texels interlacing reprojects.
+			# The resolve writes this parity's histories and reads the other's, as does the raymarch for
+			# interlace-reprojected texels.
 			for set_parity in 2:
 				var history := view_textures[1 - set_parity]
 				var history_b := view_textures[5 - set_parity]
@@ -2521,8 +2390,7 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 		var raymarch_set := state.raymarch_sets[view * 2 + parity]
 		var raymarch_base := (MAX_LAYERS + 1) * 3 * (int(msaa) + 2 * int(lifted)) + layer_count * 3
 		if interlace > 1 && history_valid:
-			# The texels traced this frame, then the reprojected rest (INTERLACE_PASS 1 and 2), each
-			# 4x4 tile's as a block of threads.
+			# Traced texels, then the reprojected rest (INTERLACE_PASS 1 and 2), each 4x4 tile as a thread block.
 			var tiles := Vector2i(ceili(size.x / (4.0 * raymarch_resolution)), ceili(size.y / (4.0 * raymarch_resolution)))
 			var per_tile := 16 / interlace
 			for interlace_pass in 2:
@@ -2563,9 +2431,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 	rd.capture_timestamp("<Sunshine Clouds")
 
 
-## Blends the resolve's changes (msaa_near, msaa_far: colour * a + b per surface) into the
-## multisampled colour color_msaa through SunshineClouds3MsaaComposite.glsl, a sample at a time:
-## times a, then plus b, of the sample's surface (msaa_near's w).
+## Blends the resolve's per-surface changes (msaa_near, msaa_far: colour * a + b) into color_msaa
+## via SunshineClouds3MsaaComposite.glsl per sample, using the sample's surface (msaa_near's w).
 func _msaa_composite(color_msaa : RID, msaa_near : RID, msaa_far : RID) -> void:
 	var framebuffer := FramebufferCacheRD.get_cache_multipass([color_msaa], [], 1)
 	var samples := rd.texture_get_format(color_msaa).samples
@@ -2578,8 +2445,7 @@ func _msaa_composite(color_msaa : RID, msaa_near : RID, msaa_far : RID) -> void:
 		add_constant.constant_id = 0
 		add_constant.value = add == 1
 		var multisample := RDPipelineMultisampleState.new()
-		# The shader reads gl_SampleID, which shades it per sample (the D3D12 driver rejects
-		# enable_sample_shading).
+		# The shader reads gl_SampleID to force per-sample shading (D3D12 rejects enable_sample_shading).
 		multisample.sample_count = samples
 		# Colour times the source, or plus it; the scene's alpha stays.
 		var attachment := RDPipelineColorBlendStateAttachment.new()
@@ -2608,21 +2474,18 @@ func _msaa_composite(color_msaa : RID, msaa_near : RID, msaa_far : RID) -> void:
 	rd.draw_list_end()
 
 
-## The skybox panorama, as the shadow map: rendered every skybox_update_interval frames into its
-## two keys in turn and blended into skybox_texture every frame (straight into it at an interval of
-## 1), and again at once when the sun, the camera height or the settings jump. While the sun, the
-## camera height, the clouds (wind, shapes) and the lights stay put it isn't rendered or blended at
-## all.
-## Rendered only while a driver asks for it (request_skybox()); its textures are kept when
-## the driver stops asking (a paused game), as its environment may still be showing them.
+## Skybox panorama, keyed like the shadow map: rendered every skybox_update_interval frames into two
+## keys in turn and blended into skybox_texture (directly at interval 1), and at once when the sun,
+## camera height or settings jump. Idle while sun, camera height, clouds and lights stay put.
+## Only rendered while a driver calls request_skybox(); textures are kept when it stops (a paused
+## game), as its environment may still show them.
 func _update_skybox(camera_position : Vector3, sun_direction : Vector3, background_rid : RID, density_rids : Array[RID], layer_count : int,
 		heightmap_rid : RID) -> void:
 	var lifted := heightmap_rid.is_valid()
 	var sky_shader := heightmap_shaders[3] if lifted else skybox_shader
 	var enabled := skybox_enabled && atmosphere_enabled && skybox_requested_msec >= 0
-	# Once asked for, the textures stay while it's off too: a driver's Sky samples them until it lets
-	# go (a frame later, or once a paused game resumes), and a freed one breaks its material. Replaced
-	# ones are retired, which leaves the driver frames to move to the new one.
+	# Once requested, the textures persist while off: a driver's Sky samples them until it lets go (a frame
+	# later, or when a paused game resumes), and freeing one breaks its material. Replaced ones are retired.
 	var size := Vector2i(skybox_resolution, skybox_resolution / 2) if skybox_requested_msec >= 0 else Vector2i.ZERO
 	var use_keys := size != Vector2i.ZERO && skybox_update_interval > 1
 	if size != skybox_texture_size || use_keys != skybox_keys[0].is_valid():
@@ -2653,7 +2516,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		# Rendered afresh when it's back on.
 		skybox_keys_ready = 0
 		return
-	if Time.get_ticks_msec() - skybox_requested_msec >= 500: # How long a request_skybox() keeps the skybox updating (ms). 250-1000: long enough to cover a few update intervals.
+	if Time.get_ticks_msec() - skybox_requested_msec >= 500: # How long a request_skybox() keeps it updating (ms). 250-1000: enough to cover a few update intervals.
 		return
 
 	var inputs_changed := _set_input(skybox_set_inputs, 0, skybox_texture)
@@ -2700,9 +2563,8 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 	var camera_height := get_cloud_height(camera_position)
 	var camera_up := get_planet_up(camera_position)
 	var reset := skybox_keys_ready == 0 || absf(camera_height - skybox_key_camera_height) > 200.0 * cloud_scale \
-		|| sun_direction.dot(skybox_key_sun) < 0.9998 || camera_up.dot(skybox_key_up) < 0.9998 # 200.0: camera height change (m, times cloud_scale) since the last render that re-renders the skybox at once. 100-500: lower snaps sooner on big climbs, higher leans on the interval updates.
-	# Nothing it depends on changed since the last render: it stays as it is (so the editor, which
-	# only redraws on changes, can go idle).
+		|| sun_direction.dot(skybox_key_sun) < 0.9998 || camera_up.dot(skybox_key_up) < 0.9998 # 200.0: height change (m, times cloud_scale) that re-renders at once. 100-500: lower snaps sooner on big climbs.
+	# Unchanged since the last render: leave it, so the editor (which redraws only on changes) can idle.
 	var clouds_state := layers_bytes.slice(0, layer_count * LAYER_BYTES) if skybox_clouds else PackedByteArray()
 	if lifted && skybox_clouds:
 		# The heightmap's settings, texture and changes too.
@@ -2710,7 +2572,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		clouds_state.append_array(var_to_bytes([heightmap_rid.get_id(), heightmap_version]))
 	var changed := absf(camera_height - skybox_key_camera_height) > 1.0 * cloud_scale || !sun_direction.is_equal_approx(skybox_key_sun) \
 		|| !camera_up.is_equal_approx(skybox_key_up) \
-		|| clouds_state != skybox_key_clouds || lights_version != skybox_key_lights # 1.0: camera height change (m, times cloud_scale) below which an otherwise unchanged skybox idles. 0.5-5: lower re-renders on tiny bobs, higher lets the horizon drift.
+		|| clouds_state != skybox_key_clouds || lights_version != skybox_key_lights # 1.0: height change (m, times cloud_scale) below which an unchanged skybox idles. 0.5-5: lower re-renders on tiny bobs, higher lets the horizon drift.
 	var groups := Vector2i(ceili(size.x / 8.0), ceili(size.y / 8.0))
 	if reset || (changed && (!use_keys || skybox_age >= skybox_update_interval)):
 		if use_keys:
@@ -2725,8 +2587,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		skybox_blended = false
 		skybox_version += 1
 		if skybox_fixed_height:
-			# For this dispatch only: the Params with the camera at camera_position (its height, and the
-			# offset to the planet's centre with it).
+			# For this dispatch only: Params with the camera at camera_position (height and planet-centre offset).
 			var moved_params := params_bytes.duplicate()
 			moved_params.encode_float(64 + 52, camera_position.y)
 			_encode_vec4(moved_params, 208, camera_position - get_planet_center(), 1.0 if spherical_planet else 0.0)
@@ -2739,8 +2600,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		if skybox_fixed_height:
 			rd.buffer_update(params_buffer, 0, PARAMS_BYTES, params_bytes)
 	if use_keys && !skybox_blended:
-		# As the shadow map's: the latest key's weight goes from 1 / interval after it's rendered to 1
-		# when the next one is due; with only one key so far it's that one. Done once it's at 1.
+		# Weighted as the shadow map's keys; done once the latest key's weight reaches 1.
 		var latest_weight := minf(float(skybox_age + 1) / skybox_update_interval, 1.0) if skybox_keys_ready == 2 else 1.0
 		skybox_blended = latest_weight >= 1.0
 		skybox_version += 1
@@ -2753,8 +2613,7 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		rd.compute_list_end()
 
 
-## Calls the batch's callables with (position, density), in the order they were added. As
-## SunshineClouds2's retrieve_position_queries().
+## Calls the batch's callables with (position, density) in order, as SunshineClouds2's retrieve_position_queries().
 func retrieve_position_queries(data : PackedByteArray):
 	position_query_mutex.lock()
 	var callables := positionQueryCallables.slice(0, positionQueriesEncoded)

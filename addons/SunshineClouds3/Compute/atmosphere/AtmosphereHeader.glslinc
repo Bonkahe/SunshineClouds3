@@ -1,12 +1,10 @@
-// Glue for Eric Bruneton's Precomputed Atmospheric Scattering (AtmosphereDefinitions.glslinc and
-// AtmosphereFunctions.glslinc are his definitions.glsl and functions.glsl, unchanged; BSD
-// licence in LICENSE.txt). This plays the part of the header model.cc prepends: the GLSL
-// macros, texture sizes and the ATMOSPHERE parameters, which come from a uniform buffer here
-// so they can change at runtime. Lengths are in kilometres, radiance for 680, 550 and 440 nm.
+// Glue for Eric Bruneton's Precomputed Atmospheric Scattering. AtmosphereDefinitions.glslinc and
+// AtmosphereFunctions.glslinc are his definitions.glsl and functions.glsl (code unchanged, comments condensed;
+// BSD licence in LICENSE.txt). This is the header model.cc prepends: GLSL macros, texture sizes and ATMOSPHERE,
+// read from a uniform buffer so it can change at runtime. Lengths in km; radiance for 680, 550 and 440 nm.
 //
-// Include order (Godot's shader import doesn't nest includes): AtmosphereHeader.glslinc,
-// AtmosphereDefinitions.glslinc, AtmosphereParameters.glslinc (define ATMOSPHERE_BINDING, set 0,
-// first), AtmosphereFunctions.glslinc.
+// Include order (Godot's shader import doesn't nest includes): AtmosphereHeader, AtmosphereDefinitions,
+// AtmosphereParameters (define ATMOSPHERE_BINDING, set 0, first), AtmosphereFunctions.
 
 #define IN(x) const in x
 #define OUT(x) out x

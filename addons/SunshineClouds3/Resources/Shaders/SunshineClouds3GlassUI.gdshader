@@ -1,4 +1,4 @@
-// Frosted / refracting glass for UI (a canvas_item material), uses reflections from the sunshine clouds, though it honestly just needs the screen_texture
+// Frosted/refracting UI glass. Can read the clouds' reflection image, but by default just needs the screen texture.
 
 shader_type canvas_item;
 

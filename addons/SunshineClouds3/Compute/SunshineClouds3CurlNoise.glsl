@@ -1,17 +1,14 @@
 #[compute]
 #version 450
 
-// Tiling 3D curl noise for SunshineClouds3's curl_noise, run by build_curl_noise(). Three
-// periodic gradient noise fBm potentials (psi) with analytic derivatives give
-// curl(psi), a divergence free (pure swirl) flow (Bridson et al. 2007, "Curl-Noise for Procedural
-// Fluid Flow"). Vorticity blends it with the gradient of the first potential, a flow of pure
-// sources and sinks, and turbulence folds each octave (|noise|, Perlin's turbulence), which
-// creases the potentials into sharp shear lines. Everything is in texture space (0..1 per axis),
-// so the noise tiles on every axis at any resolution and ratio.
-// Run three times: stage 0 finds the largest flow component, stage 1 sums the squared components
-// (relative to it) for their RMS, stage 2 writes the flow scaled to an RMS of FLOW_RMS into rgb
-// (0.5 = none, the rare peaks past 1 / FLOW_RMS sigma clip), a = 1. Normalising by the RMS keeps
-// the average push the same whatever the settings.
+// Tiling 3D curl noise for SunshineClouds3's curl_noise (build_curl_noise()). Three periodic gradient noise fBm
+// potentials (psi) with analytic derivatives give curl(psi), a divergence free flow (Bridson et al. 2007,
+// "Curl-Noise for Procedural Fluid Flow"). vorticity blends it with the first potential's gradient (pure sources
+// and sinks); turbulence folds each octave (|noise|), creasing the potentials into sharp shear lines. Works in
+// texture space (0..1 per axis), so it tiles on every axis at any resolution and ratio.
+// Three stages: 0 finds the largest flow component, 1 sums squared components (relative to it) for the RMS, 2 writes
+// the flow scaled to an RMS of FLOW_RMS into rgb (0.5 = none; peaks past 1 / FLOW_RMS sigma clip), a = 1. RMS
+// normalising keeps the average push the same across settings.
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
@@ -19,8 +16,8 @@ layout(rgba8, set = 0, binding = 0) uniform restrict writeonly image3D curl_imag
 layout(set = 0, binding = 1, std430) restrict buffer Range {
 	// Bits of the largest absolute flow component (positive floats order like their bits).
 	uint max_component;
-	// Sum of (component / max)^2 * SUM_SCALE over every voxel, added per workgroup: at most
-	// 64 * 3 * SUM_SCALE per group, which fits a uint up to 512^3 voxels.
+	// Sum of (component / max)^2 * SUM_SCALE over every voxel, added per workgroup: at most 64 * 3 * SUM_SCALE
+	// per group, which fits a uint up to 512^3 voxels.
 	uint sum_squares;
 } flow_range;
 
@@ -96,8 +93,7 @@ vec4 gradient_noise(vec3 p, int period, uvec3 key) {
 	return vec4(value, derivatives);
 }
 
-// One potential: fBm of the noise, doubling the frequency per octave (whole periods, so it still
-// tiles), with derivatives in texture space.
+// One potential: fBm doubling frequency per octave (whole periods, so it tiles), derivatives in texture space.
 vec4 potential(vec3 uv, uint channel) {
 	vec4 sum = vec4(0.0);
 	float amplitude = 1.0;

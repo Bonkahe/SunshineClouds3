@@ -1,5 +1,4 @@
-// A basic screen-space reflection (SSR) material.
-// It's a bit broken, it throws errors, just a starting point, I really need to rewrite this.
+// Basic screen-space reflection material. A rough starting point: throws errors, needs a rewrite.
 shader_type spatial;
 render_mode depth_draw_always;
 

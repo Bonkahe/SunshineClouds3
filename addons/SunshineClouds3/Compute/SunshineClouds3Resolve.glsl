@@ -8,17 +8,14 @@ msaa = "#define MSAA";
 
 VERSION_DEFINES
 
-// The msaa version, with 3D MSAA (SunshineClouds3.gd): depth_texture is the multisampled depth
-// (Common), and the clouds go into msaa_near_image (and msaa_far_image) as colour * a + b instead
-// of onto color_image, for SunshineClouds3MsaaComposite.glsl to apply to the multisampled colour.
+// msaa version (3D MSAA, SunshineClouds3.gd): depth_texture is multisampled (Common), and the clouds go into
+// msaa_near_image/msaa_far_image as colour * a + b for SunshineClouds3MsaaComposite.glsl to apply.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// Off (SunshineClouds3.gd's atmosphere_enabled), the scene's own sky stays, nothing is fogged and
-// the clouds' sky light is a fixed plain sky radiance.
+// SunshineClouds3.gd's atmosphere_enabled. Off: scene sky kept, no fog, clouds get a fixed sky radiance.
 layout(constant_id = 0) const bool ATMOSPHERE_ENABLED = true;
-// SunshineClouds3.gd's atmosphere_glow_shadows: the air in the opaque scene's shadow (in front of a
-// hill hiding the sun) gives none of the glow around the light (glow_shadow_masks()).
+// SunshineClouds3.gd's atmosphere_glow_shadows: air in the opaque scene's shadow gives no glow (glow_shadow_masks()).
 layout(constant_id = 1) const bool GLOW_SHADOWS = true;
 
 #define CLOUD_SHADOWS
@@ -31,18 +28,15 @@ layout(constant_id = 1) const bool GLOW_SHADOWS = true;
 #include "atmosphere/AtmosphereFunctions.glslinc"
 
 #ifdef MSAA
-// composite() as a and b (colour * a + b), as halves: x = a.rg, y = (a.b, b.r), z = b.gb; the near
-// image's w is the far samples' bits (msaa_far_samples(), Common). The far image only where the
-// pixel has samples on a far surface.
+// composite() as colour * a + b in halves: x = a.rg, y = (a.b, b.r), z = b.gb. Near w = far sample bits
+// (msaa_far_samples(), Common). The far image is written only where the pixel has far samples.
 layout(rgba32ui, set = 0, binding = 31) uniform restrict writeonly uimage2D msaa_near_image;
 layout(rgba32ui, set = 0, binding = 32) uniform restrict writeonly uimage2D msaa_far_image;
 #else
 layout(rgba16f, set = 0, binding = 0) uniform restrict image2D color_image;
 #endif
-// The raymarch's values (SunshineClouds3Raymarch.glsl's current_image and current_b_image) and
-// their accumulation, last frame's and this frame's. The second accumulation texture also holds
-// the scene distance: r = scene distance (km), g = sky ambient intensity, b = weighted cloud
-// distance, a = ground ambient intensity.
+// Raymarch output (SunshineClouds3Raymarch.glsl current_image/current_b_image) and its accumulation, last and this
+// frame's. b accumulation: r = scene distance (km), g = sky ambient, b = weighted cloud distance, a = ground ambient.
 layout(set = 0, binding = 6) uniform sampler2D history_texture;
 layout(set = 0, binding = 17) uniform sampler2D history_b_texture;
 layout(rgba16f, set = 0, binding = 7) uniform restrict writeonly image2D accumulation_image;
@@ -65,25 +59,20 @@ vec3 aerial_perspective(vec3 ray_origin, vec3 ray_direction, float distance, flo
 	return atmosphere_aerial_perspective(ray_origin, ray_direction, distance, glow_scale, glow_shadow, glow_extent, transmittance);
 }
 
-const int GLOW_SHADOW_SAMPLES = 10; // Depth samples per light along its line on screen (glow_shadow_masks()). 6-16: fewer leaves some glow in the shadow away from the light, more costs.
-const float GLOW_SHADOW_THICKNESS = 2.0; // How far behind a surface on screen the scene is taken to go on, times its distance. 1.5-4: lower lets glow through hills, higher has thin near things (trees, poles) shade long stretches of haze.
+const int GLOW_SHADOW_SAMPLES = 10; // Depth samples per light along its screen line. 6-16: fewer leaks glow into shadow far from the light, more costs.
+const float GLOW_SHADOW_THICKNESS = 2.0; // Assumed scene depth behind a surface, times its distance. 1.5-4: lower lets glow through hills, higher lets thin near objects (trees, poles) shade long stretches of haze.
 
-// Which air along the pixel's view ray to the opaque scene (surface m away, 0 for none) is in the
-// scene's shadow, for each atmosphere light: bit b of its mask for the air from b / 32 to
-// (b + 1) / 32 of the way (glow_lit_fraction(), Sky). Its glow is strongly forward, so in front of
-// a hill hiding the sun the air is in the hill's shadow and gives none: no halo over the hill.
+// Which air along the view ray to the opaque scene (surface m away, 0 for none) is in the scene's shadow, per
+// atmosphere light: bit b covers b / 32 to (b + 1) / 32 of the way (glow_lit_fraction(), Sky). The glow is strongly
+// forward, so air in front of a hill hiding the sun gives none: no halo over the hill.
 //
-// Every light ray from the view ray lies in the plane of the view and the light, which is a line
-// on screen, from the pixel to the light. A light ray from the view ray's point at t passes a
-// direction beta from the light (and angle from the view) at t * sin(angle) / sin(beta): where the
-// scene there is nearer (and within GLOW_SHADOW_THICKNESS of it), it's behind the scene, in its
-// shadow. So each depth sample on that line shades a stretch of the view ray. The samples get
-// denser towards the light (beta geometrically from the view to half a pixel from the light),
-// where the stretch they shade is nearer the camera; the last stands for the rest of the way, so
-// a light hidden behind the scene shades the air from the camera on (the air near the camera has
-// the camera's view of it). Off screen counts as lit, so does the sky. A pixel the light is behind
-// is all in shadow. The shadow fades out between 60 and 90 degrees from the light, where its glow
-// is faint.
+// Light rays from the view ray lie in the view/light plane, a screen line from the pixel to the light. A light ray
+// from the view ray at t passes direction beta from the light (angle from the view) at t * sin(angle) / sin(beta):
+// where the scene there is nearer (within GLOW_SHADOW_THICKNESS), the light ray is in its shadow. So each depth sample
+// on the line shades a stretch of the view ray. Samples get denser towards the light (beta geometric from the view to
+// half a pixel from the light), where their stretch is nearer the camera; the last covers the rest, so a light hidden
+// behind the scene shades the air from the camera on. Off screen and sky count as lit; a pixel the light is behind is
+// all in shadow. The shadow fades out between 60 and 90 degrees from the light, where the glow is faint.
 uvec4 glow_shadow_masks(ivec2 pixel, float surface) {
 	uvec4 masks = uvec4(0u);
 	if (!GLOW_SHADOWS || !ATMOSPHERE_ENABLED || surface <= 0.0) {
@@ -147,21 +136,19 @@ uvec4 glow_shadow_masks(ivec2 pixel, float surface) {
 	return masks;
 }
 
-// The raymarch texels a group's pixels gather from (those under the group and a one texel border,
-// at most 10 x 10 at raymarch_resolution 1), read once per group instead of 9 times per pixel.
+// Raymarch texels under the group plus a one texel border (at most 10 x 10 at raymarch_resolution 1),
+// read once per group instead of 9 times per pixel.
 #define TILE_TEXELS 100
 shared vec4 tile_value[TILE_TEXELS];
 shared vec3 tile_value_b[TILE_TEXELS]; // current_b_texture's
 shared vec2 tile_pixel[TILE_TEXELS]; // the pixel the texel traced
 shared float tile_distance[TILE_TEXELS]; // scene distance at that pixel
 
-// The pixel's clouds for an opaque scene at max_distance (m): result = absorption and direct light,
-// result_b = sky ambient, weighted distance and ground ambient. This frame's values come from the
-// 3x3 raymarch texels around the pixel, each weighted by a tent of one block on the distance to the
-// pixel it traced. Only texels at a similar scene distance (or whose opaque cloud hides both, or
-// whose absorption matches the pixel's own: see same_cloud_own) count, so nothing bleeds across
-// silhouettes; they also give the range the history is clamped to. Interlaced, the traced texels
-// (the new ones) are also summed apart.
+// The pixel's clouds for an opaque scene at max_distance (m): result = absorption and direct light, result_b = sky
+// ambient, weighted distance and ground ambient. Built from the 3x3 raymarch texels around the pixel, tent weighted
+// (one block wide) by distance to the pixel each traced. Only texels at a similar scene distance or matching cloud
+// (same_cloud_own()) count, so nothing bleeds across silhouettes; they also set the history clamp range. Interlaced,
+// the freshly traced texels are also summed apart.
 void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin, vec3 ray_direction, float max_distance,
 		out vec4 result, out vec3 result_b) {
 	ivec2 size = ivec2(params.screen_size);
@@ -186,8 +173,7 @@ void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin
 	vec4 closest = vec4(0.0);
 	vec3 closest_b = vec3(0.0);
 	float closest_ratio = -1.0;
-	// The pixel's own light absorption, from its texels at its own distance (-1 when there are none):
-	// what the texels at other distances are matched by.
+	// Mean absorption of the texels at the pixel's own distance (-1 if none); texels at other distances match it.
 	float own_absorption = 0.0;
 	float own_count = 0.0;
 	for (int y = -1; y <= 1; y++) {
@@ -252,16 +238,14 @@ void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin
 		current = result;
 		current_b = result_b;
 		if (params.interlace > 1) {
-			// Blend towards the traced texels only, at a weight that takes in new samples at the
-			// same rate as with every texel traced every frame.
+			// Blend towards the traced texels only, weighted to take in new samples as fast as without interlacing.
 			if (traced_weight > 0.0) {
 				current = traced_sum / traced_weight;
 				current_b = traced_sum_b / traced_weight;
 			}
 			current_weight = min(params.current_frame_weight * float(params.interlace) * traced_weight / weight_sum, 1.0);
-			// The reprojected texels hardly clamp the history, being the history itself. The traced
-			// ones' range is used when the window holds at least its share of them (9 / interlace,
-			// and 3); fewer make it too narrow (flicker).
+			// Reprojected texels are the history itself, so clamp to the traced ones' range when there are at
+			// least max(9 / interlace, 3) of them; fewer make it too narrow (flicker).
 			if (traced_count >= max((9 + params.interlace - 1) / params.interlace, 3)) {
 				neighbourhood_min = traced_min;
 				neighbourhood_max = traced_max;
@@ -276,14 +260,11 @@ void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin
 		neighbourhood_max_b = closest_b;
 	}
 
-	// History is dropped off screen and where opaque scene is now in front of the cloud it held;
-	// the rest is clamped to the neighbourhood range so content that is gone can't linger.
-	// It's reprojected at the cloud's (absorption weighted) distance, and where the camera moved
-	// enough for that to differ, also at the scene's: thin air near the camera pulls a pixel's
-	// distance in, while the far cloud or sky that shows through it moves with the scene (leaving
-	// the edge of a cloud, its history came from inside the far cloud beside it: speckle). The
-	// scene's is taken when it's nearer this frame's value by more than the pixel's opacity, so
-	// opaque cloud, whose own texture moves with it, keeps the cloud's.
+	// History is dropped off screen and where opaque scene now covers the cloud it held; the rest is clamped to
+	// the neighbourhood range so vanished content can't linger. It's reprojected at the cloud's (absorption
+	// weighted) distance and, if the camera moved enough to matter, also at the scene's: thin air near the camera
+	// pulls the distance in while the far cloud or sky behind it moves with the scene (else cloud edges speckle).
+	// The scene's wins when nearer this frame's value by more than the pixel's opacity, so opaque cloud keeps its own.
 	if (params.history_valid) {
 		float distance_to_cloud = cloud_distance(result.x, result_b.y);
 		bool history_found = false;
@@ -310,7 +291,7 @@ void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin
 			if (!found || max_distance < cloud_distance(found_value.x, found_b.b) * 0.95) {
 				continue;
 			}
-			// How far it is from this frame's value: absorption, and direct light relative to this frame's.
+			// Difference from this frame's value: absorption, plus direct light relative to this frame's.
 			float error = abs(found_value.x - result.x) + length(found_value.yzw - result.yzw) / (length(result.yzw) + 1e-3);
 			if (!history_found || error < history_error * (1.0 - result.x)) {
 				history_found = true;
@@ -326,16 +307,14 @@ void reconstruct(ivec2 pixel, ivec2 tile_origin, int tile_width, vec3 ray_origin
 	}
 }
 
-// Screen space cloud shadows, when the light can't take them as a projector: opaque surfaces
-// are darkened (ambient included) by the sunlight the clouds leave them, fading out towards the
-// edge of the map.
+// Screen space cloud shadows, when the light can't take them as a projector: darkens opaque surfaces
+// (ambient included), fading out towards the map's edge.
 float surface_sunlight(vec3 ray_origin, vec3 ray_direction, float surface) {
 	float sunlight = 1.0;
 	if (shadow.screen_space != 0 && shadow.march_length > 0.0 && surface > 0.0 && surface < params.max_distance) {
 		float fade = 1.0 - smoothstep(shadow.fade_start, shadow.extent * 0.5, surface);
 		if (fade > 0.0) {
-			// The optical depth still ahead, interpolated between the map's three levels (zero at
-			// the end of the march).
+			// Optical depth still ahead, interpolated between the map's three levels (zero at the march's end).
 			vec3 world = ray_origin + ray_direction * surface;
 			vec2 wrapped = fract((shadow.world_to_light * vec4(world, 1.0)).xy / shadow.extent + 0.5);
 			vec4 value = textureLod(shadow_map, vec2(wrapped.x, 1.0 - wrapped.y), 0.0);
@@ -351,8 +330,8 @@ float surface_sunlight(vec3 ray_origin, vec3 ray_direction, float surface) {
 	return sunlight;
 }
 
-// The scene's colour at a pixel (opaque scene at surface m, 0 for none) with its clouds (result,
-// result_b) and the atmosphere over it; glow_shadow is glow_shadow_masks()'.
+// Pixel colour with its clouds (result, result_b) and atmosphere applied. surface: opaque scene (m, 0 for none);
+// glow_shadow: from glow_shadow_masks().
 vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b, uvec4 glow_shadow) {
 	float light_absorption = result.x;
 	AtmosphereParameters atmosphere = ATMOSPHERE;
@@ -363,7 +342,7 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, surface, 1.0, glow_shadow, 1.0, transmittance);
 		color = color * sunlight * transmittance + in_scatter;
 	} else if (ATMOSPHERE_ENABLED) {
-		// The sky, and the background behind it (seen across about pixel_angle radians a pixel).
+		// Sky plus the background behind it (pixel_angle: radians per pixel).
 		vec3 transmittance;
 		vec3 disc;
 		float through;
@@ -376,9 +355,8 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 	}
 	if (light_absorption > 0.0) {
 		float distance_to_cloud = cloud_distance(result.x, result_b.y);
-		// The direct light (the raymarch's, every light's) and the sky irradiance at the cloud as
-		// an average radiance.
-		vec3 sky_light = atmosphere.solar_irradiance * params.radiance_scale * vec3(0.04, 0.06, 0.1); // Plain sky radiance: without the atmosphere, the clouds' sky light as a fraction of the sun's irradiance, about a clear midday sky. Each channel 0.02-0.15, blue highest.
+		// Raymarched direct light (all lights) plus sky irradiance at the cloud as an average radiance.
+		vec3 sky_light = atmosphere.solar_irradiance * params.radiance_scale * vec3(0.04, 0.06, 0.1); // Without the atmosphere: sky light as a fraction of solar irradiance, about a clear midday sky. Each 0.02-0.15, blue highest.
 		if (ATMOSPHERE_ENABLED) {
 			vec3 point = atmosphere_position(ray_origin + ray_direction * distance_to_cloud);
 			sky_light = atmosphere_sky_irradiance(atmosphere, point) / PI * params.radiance_scale * sky_settings.atmosphere_tint;
@@ -386,8 +364,7 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 		// Tinted after the accumulation, so a change shows at once.
 		vec3 cloud_color = (result.yzw + (result_b.x * params.ambient_color + result_b.z * params.ground_color) * sky_light * params.ambient_energy)
 				* sky_settings.cloud_tint;
-		// The air in front of the cloud is in its shadow looking towards the sun, so its glow is
-		// blocked by the cloud's opacity too.
+		// Air in front of the cloud is in its shadow towards the sun, so the cloud's opacity also blocks its glow.
 		vec3 transmittance;
 		vec3 in_scatter = aerial_perspective(ray_origin, ray_direction, distance_to_cloud, 1.0 - light_absorption, glow_shadow,
 				surface > 0.0 ? clamp(distance_to_cloud / surface, 1e-3, 1.0) : 1.0, transmittance);
@@ -398,7 +375,7 @@ vec3 composite(vec3 color, vec3 ray_origin, vec3 ray_direction, float surface, f
 
 #ifdef MSAA
 // composite() as colour * a + b, packed for SunshineClouds3MsaaComposite.glsl (w left to the caller).
-// It's affine in the colour: b is what it makes of black, a what white adds to that.
+// It's affine in colour: b = composite(black), a = composite(white) - b.
 uvec4 composite_affine(vec3 ray_origin, vec3 ray_direction, float surface, float sunlight, vec4 result, vec3 result_b) {
 	uvec4 glow_shadow = glow_shadow_masks(ivec2(gl_GlobalInvocationID.xy), surface);
 	vec3 b = composite(vec3(0.0), ray_origin, ray_direction, surface, sunlight, result, result_b, glow_shadow);
@@ -435,8 +412,7 @@ void main() {
 	vec3 ray_direction;
 	camera_ray(pixel, ray_origin, ray_direction);
 #ifdef MSAA
-	// The near surface is the one reconstructed and kept in the history; where the pixel also has
-	// samples on a far one, that one's clouds are reconstructed too (below).
+	// The near surface goes into the history; where the pixel also has far samples, their clouds are reconstructed too.
 	float near_depth;
 	float far_depth;
 	uint far_samples = msaa_far_samples(pixel, near_depth, far_depth);

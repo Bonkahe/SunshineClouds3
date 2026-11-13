@@ -59,6 +59,7 @@ script = ExtResource("10_hu8bq")
 layers = Array[ExtResource("8_y4qkf")]([SubResource("Resource_jbdfk")])
 skybox_resolution = 256
 skybox_radiance_size = 3
+skybox_fixed_height = true
 skybox_cloud_steps = 32
 skybox_cloud_light_steps = 8
 skybox_cloud_distance = 30000.0
@@ -67,7 +68,6 @@ has_last_directional = true
 last_directional_directions = PackedVector3Array(0.7117084, 0.5371706, -0.4526798)
 last_directional_radiance = PackedVector3Array(1, 1, 1)
 last_directional_samples = PackedInt32Array(4)
-last_sun_direction = Vector3(0.7117084, 0.5371706, -0.4526798)
 
 [sub_resource type="Compositor" id="Compositor_5g7v7"]
 compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_4gl14")])

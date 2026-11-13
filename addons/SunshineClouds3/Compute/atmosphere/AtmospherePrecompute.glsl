@@ -12,9 +12,8 @@ multiple_scattering = "#define COMPUTE_MULTIPLE_SCATTERING";
 
 VERSION_DEFINES
 
-// The precomputation passes of Bruneton's model.cc (Model::Precompute, radiance mode, combined
-// scattering textures) as compute kernels, one per version. Each invocation is one texel; the
-// "blend" render targets of model.cc are read, added to and written back.
+// Bruneton's model.cc Model::Precompute passes (radiance mode, combined scattering textures), one compute
+// kernel per version, one texel per invocation. model.cc's "blend" render targets are read, added to and written back.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 

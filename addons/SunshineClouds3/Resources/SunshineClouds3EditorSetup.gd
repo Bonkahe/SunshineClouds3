@@ -1,13 +1,12 @@
 @tool
 extends RefCounted
-## Setting the clouds up in the edited scene, editor only: the SunshineClouds3 plugin's Project >
-## Tools > Add Sunshine Clouds to Scene, and SunshineEffectors and SunshineOmniLights connecting
-## themselves to the driver as they're added (they load() this in the editor only, so exported games
-## never do). Each change is one undo action, told in a toast.
+## Editor-only scene setup: Project > Tools > Add Sunshine Clouds to Scene, and SunshineEffectors and SunshineOmniLights
+## connecting to the driver as they're added (they load() this only in the editor, keeping it out of exports).
+## Each change is one undo action, reported in a toast.
 
 
-## Called deferred from a SunshineEffector's or SunshineOmniLight's _ready in the editor (outside the
-## action that added it): adds it to the scene's first driver unless a driver has it already.
+## Called deferred from a SunshineEffector's or SunshineOmniLight's _ready in the editor (outside the action that
+## added it): adds it to the scene's first driver unless a driver already has it.
 static func connect_to_driver(node : Node3D) -> void:
 	var root := EditorInterface.get_edited_scene_root()
 	if !is_instance_valid(node) || root == null || !(node == root || root.is_ancestor_of(node)):
@@ -30,10 +29,9 @@ static func connect_to_driver(node : Node3D) -> void:
 	_toast("Connected %s \"%s\" to %s." % [kind, node.name, driver.name])
 
 
-## Project > Tools > Add Sunshine Clouds to Scene: adds what the edited scene lacks of a
-## WorldEnvironment, a SunshineClouds3 effect in its compositor and a SunshineClouds3Driver driving
-## it (with the WorldEnvironment as its world_environment, for the skybox), and adds the
-## scene's directional lights the driver doesn't have yet to it.
+## Project > Tools > Add Sunshine Clouds to Scene: adds whichever of a WorldEnvironment, a SunshineClouds3 compositor
+## effect and a SunshineClouds3Driver (its world_environment set, for the skybox) the scene lacks, and connects the
+## scene's directional lights the driver doesn't have yet.
 static func add_to_scene() -> void:
 	var root := EditorInterface.get_edited_scene_root()
 	if root == null:
@@ -168,7 +166,7 @@ static func _add_node(undo_redo : EditorUndoRedoManager, root : Node, node : Nod
 	undo_redo.add_undo_method(root, &"remove_child", node)
 
 
-# As the addon's test scene has it: a procedural sky, filmic tonemapping.
+# Matches the addon's test scene: procedural sky, filmic tonemapping.
 static func _new_environment() -> Environment:
 	var sky := Sky.new()
 	sky.sky_material = ProceduralSkyMaterial.new()

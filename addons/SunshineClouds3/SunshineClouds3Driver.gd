@@ -21,15 +21,9 @@ class_name SunshineClouds3Driver
 @export var wind_scale : float = 1.0
 @export var wind_direction : Vector3 = Vector3(1.0, 0.0, 1.0)
 
-var wind_direction_cur : Vector3 = Vector3(1.0, 0.0, 1.0)
-var wind_scale_cur : float = 1.0
-## origin_offset as the layer positions were last written with.
-var prev_origin_offset : Vector3 = Vector3.ZERO
-
 const PROJECTOR_META := &"_sunshine_clouds3_projector"
 
-# The lights on the clouds (paths from this node), each with its settings at the same index. Empty
-# paths (added in the inspector, no light picked yet) and missing lights are skipped.
+# Lights on the clouds (paths from this node), with settings at the same index. Empty and missing paths are skipped.
 @export_storage var directional_lights : Array[NodePath] = []:
 	set(value):
 		directional_lights = value
@@ -48,7 +42,7 @@ const PROJECTOR_META := &"_sunshine_clouds3_projector"
 	set(value):
 		omni_light_settings = value
 		notify_property_list_changed()
-# The effectors, as the lights.
+# Effectors, likewise.
 @export_storage var effectors : Array[NodePath] = []:
 	set(value):
 		effectors = value
@@ -59,51 +53,49 @@ const PROJECTOR_META := &"_sunshine_clouds3_projector"
 		effector_settings = value
 		notify_property_list_changed()
 
-# Each list's paths and settings properties, by the name its inspector fields use.
+# Paths and settings properties per list, keyed by the inspector field name.
 const LISTS := {
 	"directional": [&"directional_lights", &"directional_light_settings"],
 	"omni": [&"omni_lights", &"omni_light_settings"],
 	"effector": [&"effectors", &"effector_settings"],
 }
 
-# The lights and effectors as nodes (null where missing), resolved when the paths change and every
-# so many frames (nodes freed or added since).
+# Wind state: applied direction and scale easing toward the targets, and the origin_offset last applied to the layers.
+var wind_direction_cur : Vector3 = Vector3(1.0, 0.0, 1.0)
+var wind_scale_cur : float = 1.0
+var prev_origin_offset : Vector3 = Vector3.ZERO
+
+# Resolved nodes: lights and effectors (null where missing), re-resolved when paths change and periodically.
 var _directional_nodes : Array[DirectionalLight3D] = []
 var _omni_nodes : Array[OmniLight3D] = []
 var _effector_nodes : Array[Node3D] = []
 var _lights_resolved := false
 var _resolve_countdown := 0
 
+# Shadow projector: texture, blit material, light, and warning flags already given per light instance id (0 = engine).
 var _shadow_projector : Texture2D
 var _shadow_blit_material : ShaderMaterial
 var _shadow_light : DirectionalLight3D
-# Warnings already given, as WARN_ flags per light instance id (0 for the engine).
 var _shadow_warned := {}
-# What the effect was last handed (set_shadow_projector()), so it's only sent when it changes.
+
+# Sent to the effect: last values passed to set_shadow_projector() / set_shadow_projector_center(), resent on change.
 var _sent_clouds := 0
 var _sent_projector := RID()
 var _sent_resolution := 0
 var _sent_light_transform := Transform3D()
-# The projector window centre last handed to the effect (set_shadow_projector_center()); the
-# light's offset follows it a frame later, when the atlas has the map blitted around it.
 var _sent_center := Vector2.ZERO
 var _sent_windowed := false
 
-# The Sky drawing the skybox (made the first time), and the Environment it's set on.
+# Skybox: the Sky and the Environment it's set on, the state last applied on the RenderingServer, and the last skybox_version.
 var _skybox : Sky
 var _skybox_material : ShaderMaterial
 var _skybox_texture : Texture2DRD
 var _skybox_environment : Environment
-# What was last set on the rendering server for it (the Environment's own sky settings and the
-# skybox's Sky), and the effect's skybox_version last refreshed for.
 var _skybox_applied := []
 var _skybox_version := -1
 
-# The directional lights this driver hid below the horizon (drive_light_color: see
-# _hide_below_horizon()). Each also carries SunshineClouds3.BELOW_HORIZON_META, which the clouds read
-# and which tells a driver after a reload that it was hidden here, not by hand.
+# Below-horizon lights: ones this driver hid (tagged SunshineClouds3.BELOW_HORIZON_META), and ones shown by hand, left shown until risen.
 var _hidden_lights : Array = []
-# Lights shown by hand while hidden below the horizon (instance ids): left shown until they've risen.
 var _shown_by_hand := {}
 
 
@@ -136,8 +128,7 @@ func _ready() -> void:
 		effector_settings.append(CloudEffectorSettings.new())
 
 
-# The Cloud Lights and Cloud Effectors sections of the inspector: placeholders
-# SunshineClouds3DriverInspector replaces with the lists.
+# Inspector placeholders that SunshineClouds3DriverInspector replaces with the light and effector lists.
 func _get_property_list() -> Array[Dictionary]:
 	return [
 		{"name": "Cloud Lights", "type": TYPE_NIL, "usage": PROPERTY_USAGE_GROUP},
@@ -147,8 +138,7 @@ func _get_property_list() -> Array[Dictionary]:
 	]
 
 
-# Each light's and effector's fields for the inspector's property editors, not listed:
-# cloud_lists/<directional, omni or effector>/<index>/<node, or one of its settings' properties>.
+# Unlisted per-entry inspector fields: cloud_lists/<directional|omni|effector>/<index>/<node|setting>.
 func _get(property : StringName) -> Variant:
 	var field := _list_field(property)
 	if field.is_empty():
@@ -186,8 +176,7 @@ func _list_field(property : StringName) -> Array:
 	return [parts[1], parts[2].to_int(), parts[3]]
 
 
-## Adds light (in the same tree as this node) to the lights on the clouds with settings (a new
-## default one if null), or gives it settings if it's there already. Returns its settings resource.
+## Adds light (in this node's tree) with settings (defaults if null), or replaces them if listed. Returns the settings.
 func add_directional_light(light : DirectionalLight3D, settings : CloudDirectionalLightSettings = null) -> CloudDirectionalLightSettings:
 	if settings == null:
 		settings = CloudDirectionalLightSettings.new()
@@ -237,8 +226,8 @@ func remove_omni_light(light : OmniLight3D) -> void:
 		notify_property_list_changed()
 
 
-## As add_directional_light(), for an effector: any Node3D, the centre of its settings' sphere (a
-## SunshineEffector uses its own settings instead, and settings are kept only for if it's swapped).
+## As add_directional_light(); effector is any Node3D, the centre of the settings' sphere. A SunshineEffector uses
+## its own settings instead (these are kept in case it's swapped).
 func add_effector(effector : Node3D, settings : CloudEffectorSettings = null) -> CloudEffectorSettings:
 	if settings == null:
 		settings = CloudEffectorSettings.new()
@@ -263,9 +252,8 @@ func remove_effector(effector : Node3D) -> void:
 		notify_property_list_changed()
 
 
-## Queues a cloud density sample at position (world space): passes through to the clouds'
-## [method SunshineClouds3.add_sample], so callable is called with (position : Vector3,
-## density : float) a frame or two later. Does nothing without a clouds_resource.
+## Queues a cloud density sample at world position via [method SunshineClouds3.add_sample]; callable gets
+## (position : Vector3, density : float) a frame or two later. No-op without a clouds_resource.
 func add_sample(callable : Callable, position : Vector3) -> void:
 	if clouds_resource != null:
 		clouds_resource.add_sample(callable, position)
@@ -289,7 +277,7 @@ func _process(delta : float) -> void:
 	_resolve_countdown -= 1
 	if !_lights_resolved || _resolve_countdown <= 0:
 		_lights_resolved = true
-		_resolve_countdown = 60 # Frames between re-resolving light/effector paths to nodes. 30-120: lower picks up added/freed nodes sooner at a small per-frame cost.
+		_resolve_countdown = 60 # Frames between re-resolving paths. 30-120: lower notices added/freed nodes sooner, at a small cost.
 		_directional_nodes.resize(directional_lights.size())
 		for i in directional_lights.size():
 			_directional_nodes[i] = get_node_or_null(directional_lights[i]) as DirectionalLight3D
@@ -317,14 +305,13 @@ func _process(delta : float) -> void:
 				light.light_color = light_color
 			_hide_below_horizon(light, light_color.r <= 0.0 && light_color.g <= 0.0 && light_color.b <= 0.0)
 			driven.append(light)
-	# Hidden lights no longer driven (taken off the list, or drive_light_color turned off) come back.
+	# Re-show hidden lights no longer driven (removed, or drive_light_color off).
 	for light in _hidden_lights.duplicate():
 		if !driven.has(light):
 			_show_hidden_light(light)
 
-	# Wind, as SunshineClouds2's driver: direction and scale ease towards their targets, and every
-	# layer moves each of its noises at its own speed (the detail also rises), kept within a tile
-	# of their noise relative to the origin offset. Speeds and tiles are times the clouds' cloud_scale.
+	# Wind, as in SunshineClouds2: each layer noise moves at its own speed (detail also rises), wrapped to its tile
+	# around origin_offset. Speeds and tiles are scaled by cloud_scale.
 	wind_direction_cur = wind_direction_cur.move_toward(wind_direction, delta * transition_speed)
 	wind_scale_cur = move_toward(wind_scale_cur, clampf(wind_scale * 0.05, 0.0, 1.0), delta * transition_speed)
 	var wind_speed := 0.0 if (!iterate_wind_in_editor && Engine.is_editor_hint()) || (!iterate_wind_in_game && !Engine.is_editor_hint()) else wind_scale_cur
@@ -343,13 +330,10 @@ func _process(delta : float) -> void:
 	prev_origin_offset = origin_offset
 
 
-## Hides a driven light whose colour has gone black (dark: its disc has set below the horizon), so
-## the scene doesn't pay for a light that gives none (its shadow maps above all), and shows it again
-## once it's lit. Only visible is changed, and only on lights this driver hid: one hidden by hand
-## stays hidden, and one shown by hand while down stays shown until it has risen (and is hidden at
-## its next setting). The clouds and the atmosphere count a light hidden here as shown
-## (SunshineClouds3.light_shown()), so their lights, the shadow caster and the last lights kept for
-## the fallback stay as they were.
+## Hides a driven light while its colour is black (below the horizon) to skip its cost, shadow maps above all, and
+## shows it once lit. Only touches visible, and only on lights this driver hid: hand-hidden ones stay hidden; one shown
+## by hand while down stays shown until it rises. SunshineClouds3.light_shown() counts lights hidden here as shown, so
+## the cloud lights, shadow caster and fallback lights are unaffected.
 func _hide_below_horizon(light : DirectionalLight3D, dark : bool) -> void:
 	var id := light.get_instance_id()
 	if light.has_meta(SunshineClouds3.BELOW_HORIZON_META):
@@ -383,7 +367,7 @@ func _show_hidden_lights() -> void:
 		_show_hidden_light(light)
 
 
-## True the first time it's asked for flag on object (null for the engine).
+## True the first time it's asked for flag (its own power of two per warning) on object (null for the engine).
 func _first_warning(object : Object, flag : int) -> bool:
 	var id := object.get_instance_id() if object else 0
 	var warned : int = _shadow_warned.get(id, 0)
@@ -393,10 +377,8 @@ func _first_warning(object : Object, flag : int) -> bool:
 	return true
 
 
-## Hands the effect a projector to blit its shadow map into (and puts it on the light casting the
-## shadows, the effect's shadow_caster_id) when the effect wants projector shadows and the engine
-## and light can take them; otherwise takes it off, and the effect falls back to screen space
-## shadows.
+## Gives the effect a projector to blit its shadow map into, set on its shadow_caster_id light, when projector shadows
+## are wanted and supported; otherwise removes it and the effect falls back to screen space shadows.
 func _update_shadow_projector() -> void:
 	var light := instance_from_id(clouds_resource.shadow_caster_id) as DirectionalLight3D if clouds_resource else null
 	if !update_continuously || clouds_resource == null || !clouds_resource.cloud_shadows \
@@ -406,20 +388,20 @@ func _update_shadow_projector() -> void:
 	# Directional projectors (light_projector_size) aren't in stock Godot, nor drawable blits.
 	if light != null && !("light_projector" in light && "light_projector_size" in light
 			&& ClassDB.class_exists(&"DrawableTexture2D") && RenderingServer.has_method(&"texture_drawable_blit_rect")):
-		if _first_warning(null, 1): # Warning flag: engine lacks directional projectors. Each warning needs its own power of two (1, 2, 4, ...).
+		if _first_warning(null, 1):
 			push_warning("SunshineClouds3Driver: this Godot build has no directional light projectors, cloud shadows are screen space.")
 		light = null
 	if light != null && _shadow_projector == null && _is_cloud_projector(light.get(&"light_projector")):
 		_take_projector_off(light)
 	if light != null && light.get(&"light_projector") != null && light.get(&"light_projector") != _shadow_projector:
-		if _first_warning(light, 2): # Warning flag: light already has a projector texture. Each warning needs its own power of two (1, 2, 4, ...).
+		if _first_warning(light, 2):
 			push_warning("SunshineClouds3Driver: %s already has a projector texture, cloud shadows are screen space." % light.name)
 		light = null
 	if light != _shadow_light:
 		_release_shadow_projector()
 	if light == null:
 		return
-	if !light.shadow_enabled && _first_warning(light, 4): # Warning flag: light has shadows off. Each warning needs its own power of two (1, 2, 4, ...).
+	if !light.shadow_enabled && _first_warning(light, 4):
 		push_warning("SunshineClouds3Driver: %s needs shadow_enabled; Godot only applies a directional projector to lights casting shadows." % light.name)
 
 	var resolution := clouds_resource.cloud_shadow_resolution
@@ -439,10 +421,9 @@ func _update_shadow_projector() -> void:
 		light.set(&"light_projector", _shadow_projector)
 	if light.get(&"light_projector_size") != extent:
 		light.set(&"light_projector_size", extent)
-	# With repeat off (engines that have it) the projector only covers extent around its offset: the
-	# effect blits the map centred over the camera and faded out to the edge, and the offset moves
-	# the window there. The projector shows the map blitted last frame (the decal atlas copies it at
-	# the start of the next frame's draw), so the offset is the centre handed over then.
+	# With repeat off (where supported) the projector covers only extent around its offset, which follows the
+	# camera-centred, edge-faded map. It shows last frame's map (the decal atlas copies it at the start of the
+	# next draw), so the offset is the centre sent last frame.
 	var windowed := "light_projector_repeat" in light && "light_projector_offset" in light
 	if windowed:
 		if light.get(&"light_projector_repeat") != false:
@@ -468,10 +449,8 @@ func _update_shadow_projector() -> void:
 		RenderingServer.call_on_render_thread(clouds_resource.set_shadow_projector_center.bind(center, windowed))
 
 
-## Asks the effect for its skybox every frame and sets it as world_environment's sky on the
-## rendering server (again whenever the Environment's own sky settings change, as it pushes them
-## then); otherwise sets the Environment's own sky back. Only changes reach the rendering server,
-## so the editor can go idle.
+## Sets the effect's skybox as world_environment's sky on the RenderingServer (reapplied when the Environment pushes
+## its own sky settings), or restores the Environment's sky. Only changes are sent, so the editor can go idle.
 func _update_skybox() -> void:
 	var environment := world_environment.environment if is_instance_valid(world_environment) else null
 	var wanted := environment != null && clouds_resource != null && clouds_resource.skybox_enabled \
@@ -514,9 +493,8 @@ func _update_skybox() -> void:
 		_skybox_material.set_shader_parameter(&"refresh", float(_skybox_version % 4096))
 
 
-## Sets the Environment's own sky, background mode and sky rotation back on the rendering server,
-## as Environment's setters do, and lets go of the effect's texture (replaced or freed while the
-## skybox is off, it would break the Sky's material).
+## Restores the Environment's sky, background and rotation on the RenderingServer, and drops the effect's texture
+## (replaced or freed while the skybox is off, it would break the Sky's material).
 func _release_skybox() -> void:
 	if _skybox_texture != null:
 		_skybox_material.set_shader_parameter(&"skybox", null)
@@ -545,8 +523,7 @@ func _release_shadow_projector() -> void:
 		RenderingServer.call_on_render_thread(clouds_resource.set_shadow_projector_center.bind(Vector2.ZERO, false))
 
 
-# Takes the cloud projector off light and puts its repeat and offset back to the defaults, so the
-# camera-following offset is never saved into the scene.
+# Also resets repeat and offset, so the camera-following offset is never saved into the scene.
 func _take_projector_off(light : DirectionalLight3D) -> void:
 	light.set(&"light_projector", null)
 	if "light_projector_repeat" in light:

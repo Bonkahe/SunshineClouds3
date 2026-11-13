@@ -1,14 +1,11 @@
 #[vertex]
 #version 450
 
-// With 3D MSAA (SunshineClouds3.gd), the clouds go onto the multisampled colour, which compute
-// can't write: the resolve (its msaa version) leaves what it would do to a pixel's colour as
-// colour * a + b, once for the pixel's near surface and once for its far one where it has both
-// (msaa_far_samples(), Common), and this applies them by blending, a sample at a time (each
-// sample takes its own surface's): drawn twice, multiplying by a, then adding b. Godot's
-// RenderingDevice has neither dual source blending (both in one draw) nor sample mask outputs
-// (shading per pixel, a draw per surface). The transparent pass draws over the result, and Godot
-// resolves it with the rest of the scene.
+// With 3D MSAA (SunshineClouds3.gd), compute can't write the multisampled colour, so the resolve's msaa version
+// leaves colour * a + b per pixel for its near surface and, where it has both, its far one (msaa_far_samples(),
+// Common). This applies them per sample (each takes its own surface's) by blending in two draws: multiply by a,
+// then add b. Godot's RenderingDevice has no dual source blending (one draw) or sample mask output (per pixel
+// shading, a draw per surface). The transparent pass draws over the result; Godot resolves it with the scene.
 
 // One triangle over the screen.
 void main() {
@@ -19,8 +16,7 @@ void main() {
 #[fragment]
 #version 450
 
-// The resolve's colour * a + b per surface, as halves: x = a.rg, y = (a.b, b.r), z = b.gb. The near
-// texture's w holds which samples are on the far surface (a bit each).
+// The resolve's colour * a + b per surface, as halves: x = a.rg, y = (a.b, b.r), z = b.gb. Near w: far sample bits.
 layout(set = 0, binding = 0) uniform usampler2D near_texture;
 layout(set = 0, binding = 1) uniform usampler2D far_texture;
 

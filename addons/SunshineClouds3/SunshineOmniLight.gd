@@ -1,21 +1,17 @@
 @tool
 extends OmniLight3D
 class_name SunshineOmniLight
-## An omni light with its cloud settings on itself: listed among a [SunshineClouds3Driver]'s omni
-## lights, these are used in place of the driver's [CloudOmniLightSettings] for it. It lights the
-## clouds out to cloud_radius rather than omni_range (with its own colour, energy and attenuation),
-## and can leave the world unlit to light only the clouds. The SunshineClouds3 plugin draws its
-## cloud radius in the editor.
+## An omni light with its own cloud settings, used in place of the driver's [CloudOmniLightSettings] when listed among
+## a [SunshineClouds3Driver]'s omni lights. Lights the clouds out to cloud_radius instead of omni_range (with its own
+## colour, energy and attenuation) and can skip lighting the world. The plugin draws cloud_radius in the editor.
 
-## Whether it lights the world as any OmniLight3D does. Off, it lights only the clouds (and casts no
-## shadows of its own).
+## Lights the world as any OmniLight3D does. Off, it lights only the clouds and casts no shadows of its own.
 @export var light_world : bool = true:
 	set(value):
 		light_world = value
 		_update_world_light()
 
-## How far it reaches on the clouds (m), in place of omni_range, which stays its range on the world.
-## Its attenuation falls off over this.
+## Reach on the clouds (m), in place of omni_range (which still applies to the world). Attenuation falls off over this.
 @export_range(0.0, 100000.0, 1.0, "or_greater", "suffix:m") var cloud_radius : float = 1000.0:
 	set(value):
 		cloud_radius = value
@@ -24,14 +20,13 @@ class_name SunshineOmniLight
 ## Scales its energy (light_energy * light_volumetric_fog_energy) on the clouds only.
 @export_range(0.0, 64.0, 0.01, "or_greater") var energy_multiplier : float = 1.0
 
-## Samples through the clouds towards it per cloud sample, for the clouds' shadowing of themselves.
-## 0 = none (lit through).
+## Samples toward it per cloud sample, for the clouds' self-shadowing. 0 = none (lit through).
 @export_range(0, 16) var shadow_samples : int = 4
 
 
 func _ready() -> void:
 	if Engine.is_editor_hint():
-		# Basically this is a workaround to ensure this script is never pulled into a actual build as it uses editor interfaces.
+		# Loaded by path so the editor-only setup script (it uses editor interfaces) never ends up in an exported build.
 		Callable(load("res://addons/SunshineClouds3/Resources/SunshineClouds3EditorSetup.gd"), &"connect_to_driver").call_deferred(self)
 
 

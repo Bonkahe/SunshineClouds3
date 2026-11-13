@@ -1,5 +1,5 @@
 shader_type sky;
-// The fog makes the entire skybox permanently the fog color otherwise.
+// Otherwise fog paints the whole skybox the fog color.
 render_mode disable_fog;
 
 // SunshineClouds3's skybox panorama, laid out as SKY_COORDS.
