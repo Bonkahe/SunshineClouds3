@@ -97,6 +97,8 @@ shader_parameter/march_steps = 4
 shader_parameter/refine_steps = 6
 shader_parameter/thickness = 1.0
 shader_parameter/screen_edge_fade = 0.170000008075
+shader_parameter/height_fade_start = 50.0
+shader_parameter/height_fade_end = 500.0
 
 [node name="DemoScene" type="Node3D" unique_id=1070852390]
 

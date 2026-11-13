@@ -17,6 +17,12 @@ uniform int refine_steps : hint_range(0, 16) = 6;
 uniform float thickness : hint_range(0.0, 100.0) = 1.0;
 uniform float screen_edge_fade : hint_range(0.0, 0.5) = 0.1;
 
+// Camera height above the surface (world Y, m) over which reflected sky and clouds fade out to the engine's
+// sky reflection, hiding their misplacement from high up. Opaque hits keep their reflection.
+group_uniforms height_fade;
+uniform float height_fade_start : hint_range(0.0, 10000.0, 1.0) = 50.0;
+uniform float height_fade_end : hint_range(0.0, 10000.0, 1.0) = 200.0;
+
 float image_distance(vec2 uv) {
 	ivec2 size = textureSize(sunshine_clouds_reflection, 0);
 	ivec2 pixel = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
@@ -60,6 +66,9 @@ void fragment() {
 	float weight = 0.0;
 	float jitter = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
 	vec3 origin = VERTEX + normal * (0.002 * length(VERTEX));
+
+	float height = CAMERA_POSITION_WORLD.y - (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).y;
+	float height_fade = 1.0 - smoothstep(height_fade_start, max(height_fade_end, height_fade_start + 1e-3), height);
 
 	bool hit = false;
 	float hit_t = 0.0;
@@ -106,13 +115,14 @@ void fragment() {
 	if (hit) {
 		reflection = image_color(hit_uv, blur * hit_t / (hit_t + length(VERTEX)));
 		weight = edge_fade(hit_uv) * (1.0 - smoothstep(0.8, 1.0, hit_t / march_distance));
-	} else {
+	} else if (height_fade > 0.0) {
+		// No opaque hit: the sky and clouds along the ray.
 		vec4 clip = PROJECTION_MATRIX * vec4(ray, 0.0);
 		if (clip.w > 1e-6) {
 			vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
 			if (on_screen(uv) && image_distance(uv) >= march_distance) {
 				reflection = image_color(uv, blur);
-				weight = edge_fade(uv);
+				weight = edge_fade(uv) * height_fade;
 			}
 		}
 	}
@@ -124,5 +134,5 @@ void fragment() {
 	METALLIC = 0.0;
 	SPECULAR = clamp(sqrt(fresnel_f0 / 0.16), 0.0, 1.0) * (1.0 - weight);
 	EMISSION = reflection * fresnel * weight * reflection_strength;
-	ALPHA = 1.0;
+	//ALPHA = 1.0;
 }
