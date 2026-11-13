@@ -337,6 +337,10 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 ## ambient light): its radiance is scaled by 1 - this * (coverage + density) / 2, from Base
 ## Settings. 0 = not at all.
 @export_range(0.0, 1.0, 0.01) var skybox_cloud_dimming : float = 0.0
+## Renders the skybox from world Y skybox_height (at the camera's X and Z) instead of from the camera.
+@export var skybox_fixed_height : bool = false
+## The world Y the skybox is rendered from with skybox_fixed_height.
+@export var skybox_height : float = 0.0
 @export_subgroup("Clouds")
 ## Marches the clouds into the skybox too, far coarser than on screen: even steps, no curl noise and
 ## no omni lights. Off leaves the clear sky.
@@ -367,22 +371,12 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 @export_tool_button("Add To Project Shader Globals", "Add") var add_reflection_global_action = add_reflection_parameter_to_project
 
 @export_group("Terrain Heightmap")
-## Lifts the cloud layers over terrain: where the terrain rises above a layer's floor, the layer's
-## bottom rises with it (a cloud over a mountain sits on the mountain), the lift fading out from
-## heightmap_falloff_min to heightmap_falloff_max above the terrain, so its top bumps up less or not
-## at all. Everything that samples the clouds follows it: the view, the light and shadows, the
-## skybox and add_sample(). Off (or without a heightmap) the clouds are drawn by shaders without it,
-## at the same cost. A terrain system sets it with set_heightmap(). Spherical planets: see
-## heightmap_position.
+## Lifts the cloud layers over terrain
 @export var heightmap_enabled : bool = false:
 	set(value):
 		heightmap_enabled = value
 		heightmap_version += 1
-## The terrain's heights in its red channel (any filterable format: L8, R16, RF, RGBA8...; a
-## Texture2DRD of a terrain's own RenderingDevice texture works). Height = heightmap_position.y +
-## the value times heightmap_height_scale. Sampled bilinearly, one sample per cloud sample. A new
-## texture or new contents are picked up without stalls; after writing a Texture2DRD's texture on
-## the GPU, call set_heightmap() again so the skybox redraws.
+
 @export var heightmap : Texture2D:
 	set(value):
 		if heightmap && heightmap.changed.is_connected(_heightmap_changed):
@@ -392,12 +386,7 @@ const SET_INPUT_COUNT := 9 + VIEW_TEXTURES
 			heightmap.changed.connect(_heightmap_changed)
 		heightmap_version += 1
 ## X and Z: the world position of the heightmap's (0, 0) corner, the texture's outer edge (not its
-## first texel's centre); u runs along +X, v along +Z. Outside the rectangle the heights at its edge
-## carry on outwards (the texture is clamped, never repeated): give it a flat (or low) border where
-## the terrain ends. Y: the height of a texel value of 0, in world
-## Y like the layers' floors (not relative to ground_height). With spherical_planet heights are
-## altitudes above the planet's surface, as the layers' are, and the heightmap is laid on world X/Z:
-## fine for a terrain on the planet's top, where up is close to +Y.
+## first texel's centre); u runs along +X, v along +Z.
 @export var heightmap_position : Vector3 = Vector3.ZERO
 ## The world size (m) the whole texture covers along X and Z.
 @export var heightmap_size : Vector2 = Vector2(10000.0, 10000.0)
@@ -2429,7 +2418,8 @@ func _render_callback(_callback_type : int, render_data : RenderData) -> void:
 							shadow_blit_material, blit_params, [shadow_source.get_rid()], 0)
 
 			if first_viewport:
-				_update_skybox(cam_transform.origin, sun_direction, background_rid, [noise_rid, profile_rid, coverage_rid, curl_rid], layer_count, heightmap_rid)
+				var skybox_origin := Vector3(cam_transform.origin.x, skybox_height, cam_transform.origin.z) if skybox_fixed_height else cam_transform.origin
+				_update_skybox(skybox_origin, sun_direction, background_rid, [noise_rid, profile_rid, coverage_rid, curl_rid], layer_count, heightmap_rid)
 				rd.capture_timestamp("Render Sunshine Clouds Views")
 
 			# Up to MAX_SAMPLE_POINTS queued points (w = 0, the shader writes the density there).
@@ -2734,11 +2724,20 @@ func _update_skybox(camera_position : Vector3, sun_direction : Vector3, backgrou
 		skybox_key_lights = lights_version
 		skybox_blended = false
 		skybox_version += 1
+		if skybox_fixed_height:
+			# For this dispatch only: the Params with the camera at camera_position (its height, and the
+			# offset to the planet's centre with it).
+			var moved_params := params_bytes.duplicate()
+			moved_params.encode_float(64 + 52, camera_position.y)
+			_encode_vec4(moved_params, 208, camera_position - get_planet_center(), 1.0 if spherical_planet else 0.0)
+			rd.buffer_update(params_buffer, 0, PARAMS_BYTES, moved_params)
 		var list := rd.compute_list_begin()
 		rd.compute_list_bind_compute_pipeline(list, _pipeline(skybox_pipelines, layer_count + (MAX_LAYERS + 1) * int(lifted), sky_shader, layer_count))
 		rd.compute_list_bind_uniform_set(list, skybox_sets[1 + skybox_key if use_keys else 0], 0)
 		rd.compute_list_dispatch(list, groups.x, groups.y, 1)
 		rd.compute_list_end()
+		if skybox_fixed_height:
+			rd.buffer_update(params_buffer, 0, PARAMS_BYTES, params_bytes)
 	if use_keys && !skybox_blended:
 		# As the shadow map's: the latest key's weight goes from 1 / interval after it's rendered to 1
 		# when the next one is due; with only one key so far it's that one. Done once it's at 1.
